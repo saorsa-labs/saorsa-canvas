@@ -19,6 +19,7 @@ use axum::{
 };
 use canvas_mcp::{CanvasMcpServer, JsonRpcRequest, JsonRpcResponse};
 use futures::{SinkExt, StreamExt};
+use tokio::sync::broadcast;
 use tower_http::{
     cors::{Any, CorsLayer},
     services::ServeDir,
@@ -28,11 +29,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod routes;
 
+/// Scene change event for WebSocket broadcast.
+#[derive(Debug, Clone)]
+struct SceneChangeEvent {
+    /// Session ID that changed.
+    session_id: String,
+    /// JSON representation of the scene update.
+    payload: String,
+}
+
 /// Shared application state.
 #[derive(Clone)]
 struct AppState {
     /// MCP server instance.
     mcp: Arc<CanvasMcpServer>,
+    /// Broadcast channel for scene changes.
+    scene_tx: broadcast::Sender<SceneChangeEvent>,
 }
 
 /// Default port for the canvas server.
@@ -66,9 +78,34 @@ async fn main() -> anyhow::Result<()> {
     let web_service = ServeDir::new(&web_dir);
     let pkg_service = ServeDir::new(&pkg_dir);
 
+    // Create broadcast channel for scene changes (capacity: 100 messages)
+    let (scene_tx, _) = broadcast::channel::<SceneChangeEvent>(100);
+    let scene_tx_clone = scene_tx.clone();
+
+    // Create MCP server with change notification callback
+    let mut mcp = CanvasMcpServer::new();
+    mcp.set_on_change(move |session_id, scene| {
+        let event = SceneChangeEvent {
+            session_id: session_id.to_string(),
+            payload: serde_json::json!({
+                "type": "scene_update",
+                "session_id": session_id,
+                "element_count": scene.element_count(),
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            })
+            .to_string(),
+        };
+        // Ignore send errors (no receivers is okay)
+        let _ = scene_tx_clone.send(event);
+    });
+
     // Create shared state with MCP server
     let state = AppState {
-        mcp: Arc::new(CanvasMcpServer::new()),
+        mcp: Arc::new(mcp),
+        scene_tx,
     };
 
     // Build the router
@@ -141,12 +178,18 @@ async fn mcp_handler(
 }
 
 /// WebSocket handler for real-time communication.
-async fn websocket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(handle_socket)
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state.scene_tx.subscribe()))
 }
 
 /// Handle a WebSocket connection.
-async fn handle_socket(socket: WebSocket) {
+async fn handle_socket(
+    socket: WebSocket,
+    mut scene_rx: broadcast::Receiver<SceneChangeEvent>,
+) {
     let (mut sender, mut receiver) = socket.split();
 
     // Send welcome message
@@ -163,35 +206,88 @@ async fn handle_socket(socket: WebSocket) {
         return;
     }
 
-    // Handle incoming messages
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                tracing::debug!("Received: {}", text);
+    tracing::info!("WebSocket client connected");
 
-                // Echo back for now (TODO: integrate with MCP)
-                let response = serde_json::json!({
-                    "type": "ack",
-                    "received": text.to_string()
-                });
+    // Handle incoming messages and broadcast scene updates concurrently
+    loop {
+        tokio::select! {
+            // Handle incoming WebSocket messages
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        tracing::debug!("Received: {}", text);
 
-                if sender
-                    .send(Message::Text(response.to_string().into()))
-                    .await
-                    .is_err()
-                {
-                    break;
+                        // Parse and handle client messages
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                            match msg_type {
+                                "subscribe" => {
+                                    // Client subscribing to session updates
+                                    let session_id = parsed.get("session_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("default");
+                                    let response = serde_json::json!({
+                                        "type": "subscribed",
+                                        "session_id": session_id
+                                    });
+                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                "ping" => {
+                                    // Respond to ping with pong
+                                    let response = serde_json::json!({ "type": "pong" });
+                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    // Echo unknown messages back with ack
+                                    let response = serde_json::json!({
+                                        "type": "ack",
+                                        "received": text.to_string()
+                                    });
+                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        tracing::info!("Client disconnected");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!("WebSocket error: {}", e);
+                        break;
+                    }
+                    None => break,
+                    _ => {}
                 }
             }
-            Ok(Message::Close(_)) => {
-                tracing::info!("Client disconnected");
-                break;
+
+            // Broadcast scene updates to client
+            event = scene_rx.recv() => {
+                match event {
+                    Ok(scene_event) => {
+                        tracing::debug!("Broadcasting scene update for session: {}", scene_event.session_id);
+                        if sender.send(Message::Text(scene_event.payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged behind by {} messages", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Broadcast channel closed");
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                tracing::error!("WebSocket error: {}", e);
-                break;
-            }
-            _ => {}
         }
     }
+
+    tracing::info!("WebSocket connection closed");
 }
