@@ -5,6 +5,7 @@ members = [
     "canvas-renderer",
     "canvas-server",
     "canvas-mcp",
+    "canvas-app",
 ]
 
 [workspace.package]

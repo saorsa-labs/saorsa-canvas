@@ -28,6 +28,8 @@ tracing.workspace = true
 
 # Graphics
 wgpu = { workspace = true, optional = true }
+bytemuck = { version = "1.21", features = ["derive"] }
+pollster = "0.4"
 
 # WASM (optional)
 wasm-bindgen = { workspace = true, optional = true }

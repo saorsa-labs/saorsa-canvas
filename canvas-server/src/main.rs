@@ -4,9 +4,11 @@
 //! Binds to localhost only for security.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::StatusCode,
     response::IntoResponse,
     routing::get,
     Router,
@@ -14,6 +16,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use tower_http::{
     cors::{Any, CorsLayer},
+    services::ServeDir,
     trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -39,15 +42,34 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
 
+    // Determine the paths for static files
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let web_dir = manifest_dir.join("../web");
+    let pkg_dir = manifest_dir.join("../canvas-app/pkg");
+
+    tracing::info!("Serving web files from: {:?}", web_dir);
+    tracing::info!("Serving WASM package from: {:?}", pkg_dir);
+
+    // Build static file services
+    let web_service = ServeDir::new(&web_dir);
+    let pkg_service = ServeDir::new(&pkg_dir);
+
     // Build the router
     let app = Router::new()
-        .route("/", get(index_handler))
+        // API routes
         .route("/health", get(health_handler))
         .route("/ws", get(websocket_handler))
         .route(
             "/api/scene",
             get(routes::get_scene).post(routes::update_scene),
         )
+        // Serve WASM package at /pkg
+        .nest_service("/pkg", pkg_service)
+        // Serve manifest.json and sw.js from web directory
+        .route("/manifest.json", get(manifest_handler))
+        .route("/sw.js", get(sw_handler))
+        // Fallback to index.html for SPA
+        .fallback_service(web_service)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
         .layer(TraceLayer::new_for_http());
 
@@ -63,9 +85,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serve the main index page.
-async fn index_handler() -> impl IntoResponse {
-    axum::response::Html(include_str!("../../web/index.html"))
+/// Serve the manifest.json file.
+async fn manifest_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/manifest+json")],
+        include_str!("../../web/manifest.json"),
+    )
+}
+
+/// Serve the service worker file.
+async fn sw_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/javascript")],
+        include_str!("../../web/sw.js"),
+    )
 }
 
 /// Health check endpoint.

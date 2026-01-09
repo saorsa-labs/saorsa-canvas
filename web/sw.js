@@ -1,17 +1,29 @@
 // Saorsa Canvas Service Worker
 // Enables offline support and caching
 
-const CACHE_NAME = 'saorsa-canvas-v1';
+const CACHE_NAME = 'saorsa-canvas-v2';
 const ASSETS = [
     '/',
-    '/manifest.json'
+    '/manifest.json',
+    '/pkg/canvas_app.js',
+    '/pkg/canvas_app_bg.wasm'
 ];
 
 // Install event - cache assets
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => cache.addAll(ASSETS))
+            .then((cache) => {
+                // Try to cache all assets, but don't fail if some are missing
+                return Promise.allSettled(
+                    ASSETS.map(url =>
+                        cache.add(url).catch(err => {
+                            console.warn('Failed to cache:', url, err);
+                            return null;
+                        })
+                    )
+                );
+            })
             .then(() => self.skipWaiting())
     );
 });

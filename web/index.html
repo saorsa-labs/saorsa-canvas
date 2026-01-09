@@ -46,6 +46,7 @@
             background: rgba(26, 26, 46, 0.9);
             display: flex;
             align-items: center;
+            justify-content: space-between;
             padding: 0 16px;
             font-size: 12px;
             z-index: 100;
@@ -68,8 +69,19 @@
             background: #4caf50;
         }
 
-        #connection-indicator.disconnected {
+        #connection-indicator.offline {
+            background: #ff9800;
+        }
+
+        #connection-indicator.error {
             background: #f44336;
+        }
+
+        #wasm-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            opacity: 0.7;
         }
 
         #toolbar {
@@ -142,13 +154,77 @@
         #offline-banner.visible {
             display: block;
         }
+
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(26, 26, 46, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 200;
+        }
+
+        #loading-overlay.hidden {
+            display: none;
+        }
+
+        .loading-spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        #loading-text {
+            margin-top: 16px;
+            font-size: 14px;
+            opacity: 0.8;
+        }
+
+        #element-info {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(26, 26, 46, 0.9);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 100;
+            display: none;
+        }
+
+        #element-info.visible {
+            display: block;
+        }
     </style>
 </head>
 <body>
+    <div id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <div id="loading-text">Loading Saorsa Canvas...</div>
+    </div>
+
     <div id="status-bar">
         <div id="connection-status">
             <div id="connection-indicator"></div>
-            <span id="connection-text">Connecting...</span>
+            <span id="connection-text">Initializing...</span>
+        </div>
+        <div id="wasm-status">
+            <span id="fps-counter">0 FPS</span>
+            <span>|</span>
+            <span id="element-count">0 elements</span>
         </div>
     </div>
 
@@ -161,6 +237,8 @@
     </div>
 
     <div id="touch-indicator"></div>
+
+    <div id="element-info"></div>
 
     <div id="toolbar">
         <button class="tool-btn active" data-tool="select" title="Select">
@@ -178,74 +256,110 @@
                 <path d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2S9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17.91 11C17.91 14 15.28 16.18 12 16.18S6.09 14 6.09 11H4C4 14.72 7.28 17.77 11 18.11V21H13V18.11C16.72 17.77 20 14.72 20 11H17.91Z"/>
             </svg>
         </button>
+        <button class="tool-btn" data-tool="add-chart" title="Add Chart">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M3 13h2v8H3v-8zm4-6h2v14H7V7zm4 3h2v11h-2V10zm4-6h2v17h-2V4zm4 9h2v8h-2v-8z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="add-text" title="Add Text">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M5 4v3h5.5v12h3V7H19V4H5z"/>
+            </svg>
+        </button>
     </div>
 
-    <script>
-        // Saorsa Canvas Client
-        (function() {
+    <!-- WASM Module -->
+    <script type="module">
+        // Saorsa Canvas Client with WASM Integration
+        import init, {
+            CanvasApp,
+            createChartElement,
+            createTextElement,
+            createImageElement
+        } from './pkg/canvas_app.js';
+
+        (async function() {
             'use strict';
 
-            const canvas = document.getElementById('main-canvas');
-            const ctx = canvas.getContext('2d');
+            const loadingOverlay = document.getElementById('loading-overlay');
+            const loadingText = document.getElementById('loading-text');
             const touchIndicator = document.getElementById('touch-indicator');
             const connectionIndicator = document.getElementById('connection-indicator');
             const connectionText = document.getElementById('connection-text');
             const offlineBanner = document.getElementById('offline-banner');
+            const fpsCounter = document.getElementById('fps-counter');
+            const elementCountDisplay = document.getElementById('element-count');
+            const elementInfo = document.getElementById('element-info');
 
+            let canvasApp = null;
             let ws = null;
             let connectionStatus = 'connecting';
             let currentTool = 'select';
-            let scene = { elements: [], viewport: { width: 800, height: 600, zoom: 1, panX: 0, panY: 0 } };
+            let lastFrameTime = performance.now();
+            let frameCount = 0;
+            let fps = 0;
 
-            // Resize canvas to fill container
-            function resizeCanvas() {
-                const container = canvas.parentElement;
-                canvas.width = container.clientWidth;
-                canvas.height = container.clientHeight;
-                scene.viewport.width = canvas.width;
-                scene.viewport.height = canvas.height;
-                render();
+            // Initialize WASM module
+            async function initWasm() {
+                try {
+                    loadingText.textContent = 'Loading WASM module...';
+                    await init();
+
+                    loadingText.textContent = 'Initializing canvas...';
+                    canvasApp = new CanvasApp('main-canvas');
+
+                    // Set initial size
+                    resizeCanvas();
+
+                    loadingText.textContent = 'Ready!';
+                    setTimeout(() => {
+                        loadingOverlay.classList.add('hidden');
+                    }, 300);
+
+                    return true;
+                } catch (e) {
+                    console.error('Failed to initialize WASM:', e);
+                    loadingText.textContent = 'WASM not available - using fallback';
+                    setTimeout(() => {
+                        loadingOverlay.classList.add('hidden');
+                    }, 1000);
+                    return false;
+                }
             }
 
-            // Render the scene
-            function render() {
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            // Resize canvas
+            function resizeCanvas() {
+                const canvas = document.getElementById('main-canvas');
+                const container = canvas.parentElement;
+                const width = container.clientWidth;
+                const height = container.clientHeight;
 
-                // Draw grid
-                ctx.strokeStyle = '#f0f0f0';
-                ctx.lineWidth = 1;
-                for (let x = 0; x < canvas.width; x += 50) {
-                    ctx.beginPath();
-                    ctx.moveTo(x, 0);
-                    ctx.lineTo(x, canvas.height);
-                    ctx.stroke();
+                canvas.width = width;
+                canvas.height = height;
+
+                if (canvasApp) {
+                    canvasApp.resize(width, height);
                 }
-                for (let y = 0; y < canvas.height; y += 50) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, y);
-                    ctx.lineTo(canvas.width, y);
-                    ctx.stroke();
+            }
+
+            // Animation loop
+            function animate() {
+                if (canvasApp) {
+                    canvasApp.render();
+
+                    // Update FPS counter
+                    frameCount++;
+                    const now = performance.now();
+                    if (now - lastFrameTime >= 1000) {
+                        fps = frameCount;
+                        frameCount = 0;
+                        lastFrameTime = now;
+                        fpsCounter.textContent = fps + ' FPS';
+                        elementCountDisplay.textContent = canvasApp.elementCount() + ' elements';
+                    }
                 }
 
-                // Draw elements
-                scene.elements.forEach(el => {
-                    ctx.fillStyle = el.selected ? '#e3f2fd' : '#f5f5f5';
-                    ctx.strokeStyle = el.selected ? '#2196f3' : '#ccc';
-                    ctx.lineWidth = el.selected ? 2 : 1;
-                    ctx.fillRect(el.x, el.y, el.width, el.height);
-                    ctx.strokeRect(el.x, el.y, el.width, el.height);
-                });
-
-                // Draw welcome message if empty
-                if (scene.elements.length === 0) {
-                    ctx.fillStyle = '#999';
-                    ctx.font = '24px sans-serif';
-                    ctx.textAlign = 'center';
-                    ctx.fillText('Saorsa Canvas', canvas.width / 2, canvas.height / 2 - 20);
-                    ctx.font = '14px sans-serif';
-                    ctx.fillText('Waiting for AI to render content...', canvas.width / 2, canvas.height / 2 + 10);
-                }
+                requestAnimationFrame(animate);
             }
 
             // Connect to WebSocket
@@ -258,12 +372,12 @@
                 };
 
                 ws.onclose = () => {
-                    setConnectionStatus('disconnected');
+                    setConnectionStatus('offline');
                     setTimeout(connect, 3000);
                 };
 
                 ws.onerror = () => {
-                    setConnectionStatus('disconnected');
+                    setConnectionStatus('error');
                 };
 
                 ws.onmessage = (event) => {
@@ -280,8 +394,9 @@
                 connectionStatus = status;
                 connectionIndicator.className = status;
                 connectionText.textContent = status === 'connected' ? 'Connected' :
-                                             status === 'disconnected' ? 'Offline' : 'Connecting...';
-                offlineBanner.className = status === 'disconnected' ? 'visible' : '';
+                                             status === 'offline' ? 'Offline' :
+                                             status === 'error' ? 'Error' : 'Connecting...';
+                offlineBanner.className = status === 'offline' ? 'visible' : '';
             }
 
             function handleMessage(msg) {
@@ -290,8 +405,16 @@
                         console.log('Connected to Saorsa Canvas v' + msg.version);
                         break;
                     case 'render':
-                        scene.elements = msg.elements || [];
-                        render();
+                        // Update scene from server
+                        if (canvasApp && msg.scene) {
+                            canvasApp.setSceneJson(JSON.stringify(msg.scene));
+                        }
+                        break;
+                    case 'add_element':
+                        // Add element from AI
+                        if (canvasApp && msg.element) {
+                            canvasApp.addElement(JSON.stringify(msg.element));
+                        }
                         break;
                     case 'ack':
                         console.log('Server acknowledged:', msg.received);
@@ -309,13 +432,26 @@
             function handleTouchStart(e) {
                 e.preventDefault();
                 const touch = e.touches[0];
+                const rect = e.target.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+
                 showTouchIndicator(touch.clientX, touch.clientY);
+
+                if (canvasApp) {
+                    const touchedElement = canvasApp.handleTouch(x, y, 'start');
+                    if (touchedElement) {
+                        showElementInfo(touchedElement);
+                    } else {
+                        hideElementInfo();
+                    }
+                }
 
                 sendEvent({
                     type: 'touch',
                     phase: 'start',
-                    x: touch.clientX,
-                    y: touch.clientY,
+                    x: x,
+                    y: y,
                     tool: currentTool
                 });
             }
@@ -323,13 +459,21 @@
             function handleTouchMove(e) {
                 e.preventDefault();
                 const touch = e.touches[0];
+                const rect = e.target.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+
                 showTouchIndicator(touch.clientX, touch.clientY);
+
+                if (canvasApp) {
+                    canvasApp.handleTouch(x, y, 'move');
+                }
 
                 sendEvent({
                     type: 'touch',
                     phase: 'move',
-                    x: touch.clientX,
-                    y: touch.clientY,
+                    x: x,
+                    y: y,
                     tool: currentTool
                 });
             }
@@ -337,6 +481,72 @@
             function handleTouchEnd(e) {
                 e.preventDefault();
                 hideTouchIndicator();
+
+                if (canvasApp) {
+                    canvasApp.handleTouch(0, 0, 'end');
+                }
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'end',
+                    tool: currentTool
+                });
+            }
+
+            // Mouse handling (fallback)
+            function handleMouseDown(e) {
+                const rect = e.target.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                showTouchIndicator(e.clientX, e.clientY);
+
+                if (canvasApp) {
+                    const touchedElement = canvasApp.handleClick(x, y);
+                    if (touchedElement) {
+                        showElementInfo(touchedElement);
+                    } else {
+                        hideElementInfo();
+                    }
+                }
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'start',
+                    x: x,
+                    y: y,
+                    tool: currentTool
+                });
+            }
+
+            function handleMouseMove(e) {
+                if (e.buttons !== 1) return;
+
+                const rect = e.target.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                showTouchIndicator(e.clientX, e.clientY);
+
+                if (canvasApp) {
+                    canvasApp.handleTouch(x, y, 'move');
+                }
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'move',
+                    x: x,
+                    y: y,
+                    tool: currentTool
+                });
+            }
+
+            function handleMouseUp() {
+                hideTouchIndicator();
+
+                if (canvasApp) {
+                    canvasApp.handleTouch(0, 0, 'end');
+                }
 
                 sendEvent({
                     type: 'touch',
@@ -355,39 +565,78 @@
                 touchIndicator.classList.remove('visible');
             }
 
+            function showElementInfo(elementId) {
+                elementInfo.textContent = 'Selected: ' + elementId;
+                elementInfo.classList.add('visible');
+            }
+
+            function hideElementInfo() {
+                elementInfo.classList.remove('visible');
+            }
+
+            // Tool actions
+            function handleToolAction(tool) {
+                if (!canvasApp) return;
+
+                const canvas = document.getElementById('main-canvas');
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+
+                switch (tool) {
+                    case 'add-chart':
+                        const chartJson = createChartElement('bar', centerX - 100, centerY - 75, 200, 150);
+                        canvasApp.addElement(chartJson);
+                        break;
+                    case 'add-text':
+                        const textJson = createTextElement('Hello from AI', centerX - 50, centerY, 24, '#333333');
+                        canvasApp.addElement(textJson);
+                        break;
+                }
+            }
+
             // Tool selection
             document.querySelectorAll('.tool-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
-                    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                    const tool = btn.dataset.tool;
+
+                    // Handle add tools immediately
+                    if (tool.startsWith('add-')) {
+                        handleToolAction(tool);
+                        return;
+                    }
+
+                    // Switch active tool
+                    document.querySelectorAll('.tool-btn').forEach(b => {
+                        if (!b.dataset.tool.startsWith('add-')) {
+                            b.classList.remove('active');
+                        }
+                    });
                     btn.classList.add('active');
-                    currentTool = btn.dataset.tool;
+                    currentTool = tool;
                 });
             });
 
-            // Event listeners
-            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-
-            // Mouse fallback
-            canvas.addEventListener('mousedown', (e) => {
-                showTouchIndicator(e.clientX, e.clientY);
-                sendEvent({ type: 'touch', phase: 'start', x: e.clientX, y: e.clientY, tool: currentTool });
-            });
-            canvas.addEventListener('mousemove', (e) => {
-                if (e.buttons === 1) {
-                    showTouchIndicator(e.clientX, e.clientY);
-                    sendEvent({ type: 'touch', phase: 'move', x: e.clientX, y: e.clientY, tool: currentTool });
-                }
-            });
-            canvas.addEventListener('mouseup', () => {
-                hideTouchIndicator();
-                sendEvent({ type: 'touch', phase: 'end', tool: currentTool });
-            });
-
             // Initialize
-            window.addEventListener('resize', resizeCanvas);
-            resizeCanvas();
+            const wasmLoaded = await initWasm();
+
+            if (wasmLoaded) {
+                const canvas = document.getElementById('main-canvas');
+
+                // Event listeners
+                canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+                canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+                canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+                canvas.addEventListener('mousedown', handleMouseDown);
+                canvas.addEventListener('mousemove', handleMouseMove);
+                canvas.addEventListener('mouseup', handleMouseUp);
+
+                window.addEventListener('resize', resizeCanvas);
+
+                // Start animation loop
+                animate();
+            }
+
+            // Connect to server
             connect();
 
             // Service worker registration
@@ -395,6 +644,11 @@
                 navigator.serviceWorker.register('/sw.js').catch(() => {});
             }
         })();
+    </script>
+
+    <!-- Fallback for non-module browsers -->
+    <script nomodule>
+        document.getElementById('loading-text').textContent = 'Your browser does not support ES modules. Please use a modern browser.';
     </script>
 </body>
 </html>

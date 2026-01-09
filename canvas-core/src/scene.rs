@@ -58,11 +58,11 @@ impl Scene {
     /// # Errors
     ///
     /// Returns an error if the element is not found.
-    pub fn remove_element(&mut self, id: ElementId) -> CanvasResult<Element> {
-        self.root_elements.retain(|&eid| eid != id);
-        self.selected.retain(|&eid| eid != id);
+    pub fn remove_element(&mut self, id: &ElementId) -> CanvasResult<Element> {
+        self.root_elements.retain(|&eid| eid != *id);
+        self.selected.retain(|&eid| eid != *id);
         self.elements
-            .remove(&id)
+            .remove(id)
             .ok_or_else(|| CanvasError::ElementNotFound(id.to_string()))
     }
 
@@ -82,6 +82,11 @@ impl Scene {
         self.elements.values()
     }
 
+    /// Get mutable references to all elements in the scene.
+    pub fn elements_mut(&mut self) -> impl Iterator<Item = &mut Element> {
+        self.elements.values_mut()
+    }
+
     /// Get root-level elements (not children of groups).
     pub fn root_elements(&self) -> impl Iterator<Item = &Element> {
         self.root_elements
@@ -89,10 +94,16 @@ impl Scene {
             .filter_map(|id| self.elements.get(id))
     }
 
+    /// Set the viewport dimensions.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.viewport_width = width;
+        self.viewport_height = height;
+    }
+
     /// Find the element at the given canvas coordinates.
-    /// Returns the topmost (highest z-index) interactive element.
+    /// Returns the ID of the topmost (highest z-index) interactive element.
     #[must_use]
-    pub fn element_at(&self, x: f32, y: f32) -> Option<&Element> {
+    pub fn element_at(&self, x: f32, y: f32) -> Option<ElementId> {
         // Transform screen coordinates to canvas coordinates
         let canvas_x = (x - self.pan_x) / self.zoom;
         let canvas_y = (y - self.pan_y) / self.zoom;
@@ -107,7 +118,7 @@ impl Scene {
         // Sort by z-index (highest first)
         hits.sort_by(|a, b| b.transform.z_index.cmp(&a.transform.z_index));
 
-        hits.first().copied()
+        hits.first().map(|e| e.id)
     }
 
     /// Select an element.
@@ -193,7 +204,7 @@ mod tests {
         assert_eq!(scene.element_count(), 1);
         assert!(scene.get_element(id).is_some());
 
-        scene.remove_element(id).expect("should remove");
+        scene.remove_element(&id).expect("should remove");
         assert!(scene.is_empty());
     }
 

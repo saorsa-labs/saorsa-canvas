@@ -35,9 +35,9 @@ pub mod state;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use element::{Element, ElementId, ElementKind, Transform};
+pub use element::{Element, ElementId, ElementKind, ImageFormat, Transform};
 pub use error::{CanvasError, CanvasResult};
-pub use event::{InputEvent, TouchEvent, TouchPhase};
+pub use event::{InputEvent, TouchEvent, TouchPhase, TouchPoint};
 pub use scene::Scene;
 pub use state::{CanvasState, ConnectionStatus};
 

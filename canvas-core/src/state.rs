@@ -71,8 +71,8 @@ impl CanvasState {
             InputEvent::Touch(touch) => {
                 // Find element at touch point
                 if let Some(primary) = touch.primary_touch() {
-                    if let Some(element) = self.scene.element_at(primary.x, primary.y) {
-                        tracing::debug!("Touch on element: {}", element.id);
+                    if let Some(element_id) = self.scene.element_at(primary.x, primary.y) {
+                        tracing::debug!("Touch on element: {element_id}");
                     }
                 }
             }
