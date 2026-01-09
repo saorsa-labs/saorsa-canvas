@@ -1,0 +1,35 @@
+[package]
+name = "canvas-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+description = "MCP tools and resources for Saorsa Canvas. Extends Communitas MCP with canvas capabilities."
+
+[dependencies]
+# Core crates
+canvas-core = { path = "../canvas-core" }
+canvas-renderer = { path = "../canvas-renderer" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# UUID
+uuid.workspace = true
+
+# Base64 for binary content
+base64.workspace = true

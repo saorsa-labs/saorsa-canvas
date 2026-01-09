@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "canvas-core",
+    "canvas-renderer",
+    "canvas-server",
+    "canvas-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Saorsa Labs <dev@saorsa.io>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saorsa-labs/saorsa-canvas"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Web server
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# Graphics (wgpu)
+wgpu = "24"
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# WASM support
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "GpuDevice",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
+] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+# WebRTC (use saorsa-webrtc when available)
+# saorsa-webrtc = { path = "../saorsa-webrtc" }
+
+# Charts
+plotters = "0.3"
+plotters-canvas = "0.3"
+
+# 3D models (glTF)
+gltf = "1.4"
+
+# UUID
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# Base64 for binary encoding
+base64 = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"  # Optimize for size (important for WASM)
+strip = true
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"

@@ -1,0 +1,41 @@
+[package]
+name = "canvas-renderer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+description = "Custom minimal renderer for Saorsa Canvas built on wgpu. Provides GPU rendering with WebGL2/2D fallbacks."
+
+[features]
+default = ["gpu"]
+gpu = ["wgpu"]
+wasm = ["wasm-bindgen", "web-sys", "js-sys"]
+
+[dependencies]
+# Core canvas types
+canvas-core = { path = "../canvas-core" }
+
+# Serialization
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Graphics
+wgpu = { workspace = true, optional = true }
+
+# WASM (optional)
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+
+# Charts
+plotters.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

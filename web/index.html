@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, touch-action=none">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="description" content="Saorsa Canvas - Universal AI Visual Output">
+    <title>Saorsa Canvas</title>
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            touch-action: none;
+        }
+
+        #main-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            background: #fff;
+        }
+
+        #status-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 32px;
+            background: rgba(26, 26, 46, 0.9);
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            font-size: 12px;
+            z-index: 100;
+        }
+
+        #connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #connection-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ffc107;
+        }
+
+        #connection-indicator.connected {
+            background: #4caf50;
+        }
+
+        #connection-indicator.disconnected {
+            background: #f44336;
+        }
+
+        #toolbar {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 8px 16px;
+            border-radius: 24px;
+            z-index: 100;
+        }
+
+        .tool-btn {
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: #eee;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: background 0.2s;
+        }
+
+        .tool-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .tool-btn.active {
+            background: #6366f1;
+        }
+
+        #touch-indicator {
+            position: fixed;
+            width: 48px;
+            height: 48px;
+            border: 2px solid #6366f1;
+            border-radius: 50%;
+            pointer-events: none;
+            opacity: 0;
+            transform: translate(-50%, -50%);
+            transition: opacity 0.2s;
+            z-index: 50;
+        }
+
+        #touch-indicator.visible {
+            opacity: 1;
+        }
+
+        #offline-banner {
+            position: fixed;
+            top: 32px;
+            left: 0;
+            right: 0;
+            background: #f44336;
+            color: white;
+            text-align: center;
+            padding: 8px;
+            font-size: 14px;
+            display: none;
+            z-index: 99;
+        }
+
+        #offline-banner.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="status-bar">
+        <div id="connection-status">
+            <div id="connection-indicator"></div>
+            <span id="connection-text">Connecting...</span>
+        </div>
+    </div>
+
+    <div id="offline-banner">
+        Offline mode - some features may be limited
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="main-canvas"></canvas>
+    </div>
+
+    <div id="touch-indicator"></div>
+
+    <div id="toolbar">
+        <button class="tool-btn active" data-tool="select" title="Select">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13.64 21.97C13.14 22.21 12.54 22 12.31 21.5L10.13 16.76L7.62 18.78C7.45 18.92 7.24 19 7.02 19C6.55 19 6.12 18.61 6.12 18.08V3.92C6.12 3.39 6.55 3 7.02 3C7.24 3 7.45 3.08 7.62 3.22L19.3 12.69C19.7 13 19.73 13.59 19.36 13.94L15.27 17.71L17.45 22.45C17.67 22.95 17.46 23.55 16.96 23.78C16.46 24 15.86 23.79 15.64 23.29L13.64 21.97Z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="pan" title="Pan">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M10 9V5L3 12L10 19V14.9C15 14.9 18.5 16.5 21 20C20 15 17 10 10 9Z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="voice" title="Voice Command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2S9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17.91 11C17.91 14 15.28 16.18 12 16.18S6.09 14 6.09 11H4C4 14.72 7.28 17.77 11 18.11V21H13V18.11C16.72 17.77 20 14.72 20 11H17.91Z"/>
+            </svg>
+        </button>
+    </div>
+
+    <script>
+        // Saorsa Canvas Client
+        (function() {
+            'use strict';
+
+            const canvas = document.getElementById('main-canvas');
+            const ctx = canvas.getContext('2d');
+            const touchIndicator = document.getElementById('touch-indicator');
+            const connectionIndicator = document.getElementById('connection-indicator');
+            const connectionText = document.getElementById('connection-text');
+            const offlineBanner = document.getElementById('offline-banner');
+
+            let ws = null;
+            let connectionStatus = 'connecting';
+            let currentTool = 'select';
+            let scene = { elements: [], viewport: { width: 800, height: 600, zoom: 1, panX: 0, panY: 0 } };
+
+            // Resize canvas to fill container
+            function resizeCanvas() {
+                const container = canvas.parentElement;
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+                scene.viewport.width = canvas.width;
+                scene.viewport.height = canvas.height;
+                render();
+            }
+
+            // Render the scene
+            function render() {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Draw grid
+                ctx.strokeStyle = '#f0f0f0';
+                ctx.lineWidth = 1;
+                for (let x = 0; x < canvas.width; x += 50) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, canvas.height);
+                    ctx.stroke();
+                }
+                for (let y = 0; y < canvas.height; y += 50) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(canvas.width, y);
+                    ctx.stroke();
+                }
+
+                // Draw elements
+                scene.elements.forEach(el => {
+                    ctx.fillStyle = el.selected ? '#e3f2fd' : '#f5f5f5';
+                    ctx.strokeStyle = el.selected ? '#2196f3' : '#ccc';
+                    ctx.lineWidth = el.selected ? 2 : 1;
+                    ctx.fillRect(el.x, el.y, el.width, el.height);
+                    ctx.strokeRect(el.x, el.y, el.width, el.height);
+                });
+
+                // Draw welcome message if empty
+                if (scene.elements.length === 0) {
+                    ctx.fillStyle = '#999';
+                    ctx.font = '24px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Saorsa Canvas', canvas.width / 2, canvas.height / 2 - 20);
+                    ctx.font = '14px sans-serif';
+                    ctx.fillText('Waiting for AI to render content...', canvas.width / 2, canvas.height / 2 + 10);
+                }
+            }
+
+            // Connect to WebSocket
+            function connect() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+                ws.onopen = () => {
+                    setConnectionStatus('connected');
+                };
+
+                ws.onclose = () => {
+                    setConnectionStatus('disconnected');
+                    setTimeout(connect, 3000);
+                };
+
+                ws.onerror = () => {
+                    setConnectionStatus('disconnected');
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        handleMessage(msg);
+                    } catch (e) {
+                        console.error('Invalid message:', e);
+                    }
+                };
+            }
+
+            function setConnectionStatus(status) {
+                connectionStatus = status;
+                connectionIndicator.className = status;
+                connectionText.textContent = status === 'connected' ? 'Connected' :
+                                             status === 'disconnected' ? 'Offline' : 'Connecting...';
+                offlineBanner.className = status === 'disconnected' ? 'visible' : '';
+            }
+
+            function handleMessage(msg) {
+                switch (msg.type) {
+                    case 'welcome':
+                        console.log('Connected to Saorsa Canvas v' + msg.version);
+                        break;
+                    case 'render':
+                        scene.elements = msg.elements || [];
+                        render();
+                        break;
+                    case 'ack':
+                        console.log('Server acknowledged:', msg.received);
+                        break;
+                }
+            }
+
+            function sendEvent(event) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(event));
+                }
+            }
+
+            // Touch handling
+            function handleTouchStart(e) {
+                e.preventDefault();
+                const touch = e.touches[0];
+                showTouchIndicator(touch.clientX, touch.clientY);
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'start',
+                    x: touch.clientX,
+                    y: touch.clientY,
+                    tool: currentTool
+                });
+            }
+
+            function handleTouchMove(e) {
+                e.preventDefault();
+                const touch = e.touches[0];
+                showTouchIndicator(touch.clientX, touch.clientY);
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'move',
+                    x: touch.clientX,
+                    y: touch.clientY,
+                    tool: currentTool
+                });
+            }
+
+            function handleTouchEnd(e) {
+                e.preventDefault();
+                hideTouchIndicator();
+
+                sendEvent({
+                    type: 'touch',
+                    phase: 'end',
+                    tool: currentTool
+                });
+            }
+
+            function showTouchIndicator(x, y) {
+                touchIndicator.style.left = x + 'px';
+                touchIndicator.style.top = y + 'px';
+                touchIndicator.classList.add('visible');
+            }
+
+            function hideTouchIndicator() {
+                touchIndicator.classList.remove('visible');
+            }
+
+            // Tool selection
+            document.querySelectorAll('.tool-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentTool = btn.dataset.tool;
+                });
+            });
+
+            // Event listeners
+            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+
+            // Mouse fallback
+            canvas.addEventListener('mousedown', (e) => {
+                showTouchIndicator(e.clientX, e.clientY);
+                sendEvent({ type: 'touch', phase: 'start', x: e.clientX, y: e.clientY, tool: currentTool });
+            });
+            canvas.addEventListener('mousemove', (e) => {
+                if (e.buttons === 1) {
+                    showTouchIndicator(e.clientX, e.clientY);
+                    sendEvent({ type: 'touch', phase: 'move', x: e.clientX, y: e.clientY, tool: currentTool });
+                }
+            });
+            canvas.addEventListener('mouseup', () => {
+                hideTouchIndicator();
+                sendEvent({ type: 'touch', phase: 'end', tool: currentTool });
+            });
+
+            // Initialize
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+            connect();
+
+            // Service worker registration
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js').catch(() => {});
+            }
+        })();
+    </script>
+</body>
+</html>

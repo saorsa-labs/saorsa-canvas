@@ -1,0 +1,46 @@
+[package]
+name = "canvas-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+description = "Local embedded Axum server for Saorsa Canvas. Serves the PWA and handles WebRTC signaling."
+
+[[bin]]
+name = "saorsa-canvas"
+path = "src/main.rs"
+
+[dependencies]
+# Core crates
+canvas-core = { path = "../canvas-core" }
+canvas-renderer = { path = "../canvas-renderer" }
+canvas-mcp = { path = "../canvas-mcp" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Web server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# UUID
+uuid.workspace = true
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
