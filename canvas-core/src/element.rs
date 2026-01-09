@@ -34,7 +34,7 @@ impl std::fmt::Display for ElementId {
 }
 
 /// The type of content an element contains.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ElementKind {
     /// A 2D chart (bar, line, pie, etc.).
@@ -65,10 +65,22 @@ pub enum ElementKind {
 
     /// A video stream or WebRTC feed.
     Video {
-        /// Stream identifier.
+        /// Stream identifier (peer ID, "local", or media URL).
         stream_id: String,
         /// Whether this is a live WebRTC stream.
         is_live: bool,
+        /// Whether to mirror the video (useful for local camera).
+        mirror: bool,
+        /// Optional crop region within the video frame.
+        crop: Option<CropRect>,
+    },
+
+    /// A transparent overlay layer for annotations on top of video.
+    OverlayLayer {
+        /// Child element IDs drawn on this layer.
+        children: Vec<ElementId>,
+        /// Background opacity (0.0 = fully transparent).
+        opacity: f32,
     },
 
     /// A text label or annotation.
@@ -102,8 +114,52 @@ pub enum ImageFormat {
     WebP,
 }
 
+/// A crop rectangle for video frames.
+/// Values are normalized (0.0 to 1.0) relative to the video dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CropRect {
+    /// Left edge (0.0 = leftmost).
+    pub x: f32,
+    /// Top edge (0.0 = topmost).
+    pub y: f32,
+    /// Width (1.0 = full width).
+    pub width: f32,
+    /// Height (1.0 = full height).
+    pub height: f32,
+}
+
+impl Default for CropRect {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        }
+    }
+}
+
+impl CropRect {
+    /// Create a crop rect that shows the full frame.
+    #[must_use]
+    pub fn full() -> Self {
+        Self::default()
+    }
+
+    /// Create a centered square crop (useful for profile pictures).
+    #[must_use]
+    pub fn center_square() -> Self {
+        Self {
+            x: 0.25,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        }
+    }
+}
+
 /// Transform for positioning and sizing elements.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     /// X position (pixels from left).
     pub x: f32,
@@ -133,7 +189,7 @@ impl Default for Transform {
 }
 
 /// A canvas element with content and transform.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     /// Unique identifier.
     pub id: ElementId,

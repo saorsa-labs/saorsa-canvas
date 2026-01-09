@@ -18,7 +18,9 @@ repository = "https://github.com/saorsa-labs/saorsa-canvas"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
+async-stream = "0.3"
 futures = "0.3"
 
 # Serialization

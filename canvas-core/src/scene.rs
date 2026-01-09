@@ -165,6 +165,13 @@ impl Scene {
         self.elements.is_empty()
     }
 
+    /// Clear all elements from the scene.
+    pub fn clear(&mut self) {
+        self.elements.clear();
+        self.root_elements.clear();
+        self.selected.clear();
+    }
+
     /// Serialize the scene to JSON.
     ///
     /// # Errors

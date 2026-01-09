@@ -57,6 +57,18 @@ struct RenderedChart {
     height: u32,
 }
 
+/// Cached video frame data.
+struct VideoFrame {
+    /// RGBA pixel data.
+    data: Vec<u8>,
+    /// Width in pixels.
+    width: u32,
+    /// Height in pixels.
+    height: u32,
+    /// Frame timestamp (for staleness detection).
+    timestamp: f64,
+}
+
 /// The main canvas application for WASM.
 #[wasm_bindgen]
 pub struct CanvasApp {
@@ -70,6 +82,8 @@ pub struct CanvasApp {
     frame_count: u64,
     /// Cache for rendered charts (keyed by element ID).
     chart_cache: HashMap<ElementId, RenderedChart>,
+    /// Cache for video frames (keyed by stream ID).
+    video_frames: HashMap<String, VideoFrame>,
 }
 
 #[wasm_bindgen]
@@ -115,6 +129,7 @@ impl CanvasApp {
             background_color: "#ffffff".to_string(),
             frame_count: 0,
             chart_cache: HashMap::new(),
+            video_frames: HashMap::new(),
         })
     }
 
@@ -289,6 +304,8 @@ impl CanvasApp {
         // Handle chart rendering specially
         if let ElementKind::Chart { chart_type, data } = &element.kind {
             self.render_chart(element, chart_type, data);
+        } else if let ElementKind::Video { stream_id, .. } = &element.kind {
+            self.render_video(element, stream_id);
         } else {
             // Set fill color based on element type
             let fill_color = Self::get_element_color(element);
@@ -448,6 +465,162 @@ impl CanvasApp {
         self.ctx.fill_rect(icon_x, icon_y, 40.0, 20.0);
     }
 
+    /// Render a video element.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_video(&self, element: &Element, stream_id: &str) {
+        let t = &element.transform;
+
+        // Check if we have a cached frame for this stream
+        if let Some(frame) = self.video_frames.get(stream_id) {
+            // Scale and draw the video frame to fit the element bounds
+            self.draw_video_frame(frame, t);
+        } else {
+            // Draw placeholder if no frame available
+            self.draw_video_placeholder(t, stream_id);
+        }
+    }
+
+    /// Draw a video frame to the canvas, scaling to fit the element bounds.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn draw_video_frame(&self, frame: &VideoFrame, t: &Transform) {
+        // Create ImageData from the frame
+        let clamped = wasm_bindgen::Clamped(&frame.data[..]);
+
+        match ImageData::new_with_u8_clamped_array_and_sh(clamped, frame.width, frame.height) {
+            Ok(image_data) => {
+                // For now, draw directly (scaling would require a temporary canvas)
+                // If dimensions match, draw directly
+                if frame.width == t.width as u32 && frame.height == t.height as u32 {
+                    if let Err(e) =
+                        self.ctx
+                            .put_image_data(&image_data, f64::from(t.x), f64::from(t.y))
+                    {
+                        tracing::warn!("Failed to draw video frame: {:?}", e);
+                    }
+                } else {
+                    // Create a temporary canvas for scaling
+                    if let Some(window) = web_sys::window() {
+                        if let Some(document) = window.document() {
+                            if let Ok(temp_canvas) = document.create_element("canvas") {
+                                if let Ok(temp_canvas) =
+                                    temp_canvas.dyn_into::<HtmlCanvasElement>()
+                                {
+                                    temp_canvas.set_width(frame.width);
+                                    temp_canvas.set_height(frame.height);
+
+                                    if let Ok(Some(temp_ctx)) = temp_canvas.get_context("2d") {
+                                        if let Ok(temp_ctx) =
+                                            temp_ctx.dyn_into::<CanvasRenderingContext2d>()
+                                        {
+                                            // Draw frame to temp canvas
+                                            let _ = temp_ctx.put_image_data(&image_data, 0.0, 0.0);
+
+                                            // Draw scaled to main canvas
+                                            let _ = self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                                                &temp_canvas,
+                                                f64::from(t.x),
+                                                f64::from(t.y),
+                                                f64::from(t.width),
+                                                f64::from(t.height),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create video ImageData: {:?}", e);
+            }
+        }
+    }
+
+    /// Draw a placeholder for video when no frame is available.
+    fn draw_video_placeholder(&self, t: &Transform, stream_id: &str) {
+        // Dark background
+        self.ctx.set_fill_style_str("#212121");
+        self.ctx.fill_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        // Center text
+        self.ctx.set_fill_style_str("#757575");
+        self.ctx.set_font("14px sans-serif");
+        self.ctx.set_text_align("center");
+        self.ctx.set_text_baseline("middle");
+
+        let center_x = f64::from(t.x) + f64::from(t.width) / 2.0;
+        let center_y = f64::from(t.y) + f64::from(t.height) / 2.0;
+
+        let _ = self
+            .ctx
+            .fill_text(&format!("Video: {stream_id}"), center_x, center_y - 10.0);
+        let _ = self
+            .ctx
+            .fill_text("No signal", center_x, center_y + 10.0);
+
+        // Reset text alignment
+        self.ctx.set_text_align("start");
+        self.ctx.set_text_baseline("alphabetic");
+    }
+
+    /// Update a video frame from JavaScript.
+    /// The data should be RGBA bytes.
+    #[wasm_bindgen(js_name = updateVideoFrame)]
+    pub fn update_video_frame(
+        &mut self,
+        stream_id: &str,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        timestamp: f64,
+    ) {
+        self.video_frames.insert(
+            stream_id.to_string(),
+            VideoFrame {
+                data: data.to_vec(),
+                width,
+                height,
+                timestamp,
+            },
+        );
+    }
+
+    /// Remove a video stream from the cache.
+    #[wasm_bindgen(js_name = removeVideoStream)]
+    pub fn remove_video_stream(&mut self, stream_id: &str) {
+        self.video_frames.remove(stream_id);
+    }
+
+    /// Get the list of registered video stream IDs.
+    #[wasm_bindgen(js_name = getVideoStreamIds)]
+    #[must_use]
+    pub fn get_video_stream_ids(&self) -> Vec<String> {
+        self.video_frames.keys().cloned().collect()
+    }
+
+    /// Check if a video stream has a cached frame.
+    #[wasm_bindgen(js_name = hasVideoFrame)]
+    #[must_use]
+    pub fn has_video_frame(&self, stream_id: &str) -> bool {
+        self.video_frames.contains_key(stream_id)
+    }
+
+    /// Get the timestamp of the last frame for a video stream.
+    /// Returns 0.0 if the stream doesn't exist.
+    #[wasm_bindgen(js_name = getVideoFrameTimestamp)]
+    #[must_use]
+    pub fn get_video_frame_timestamp(&self, stream_id: &str) -> f64 {
+        self.video_frames
+            .get(stream_id)
+            .map_or(0.0, |f| f.timestamp)
+    }
+
     /// Get the display color for an element.
     fn get_element_color(element: &Element) -> String {
         match &element.kind {
@@ -455,6 +628,7 @@ impl CanvasApp {
             ElementKind::Image { .. } => "#f5f5f5".to_string(), // Light gray
             ElementKind::Model3D { .. } => "#e8f5e9".to_string(), // Light green
             ElementKind::Video { .. } => "#212121".to_string(), // Dark gray
+            ElementKind::OverlayLayer { opacity, .. } => format!("rgba(255, 255, 255, {opacity})"),
             ElementKind::Text { color, .. } => color.clone(),
             ElementKind::Group { .. } => "rgba(255, 253, 231, 0.5)".to_string(), // Transparent yellow
         }
@@ -467,6 +641,7 @@ impl CanvasApp {
             ElementKind::Image { .. } => "Image".to_string(),
             ElementKind::Model3D { .. } => "3D Model".to_string(),
             ElementKind::Video { stream_id, .. } => format!("Video: {stream_id}"),
+            ElementKind::OverlayLayer { children, .. } => format!("Overlay ({})", children.len()),
             ElementKind::Text { content, .. } => {
                 let preview = if content.len() > 20 {
                     format!("{}...", &content[..20])
@@ -610,6 +785,36 @@ pub fn create_image_element(src: &str, x: f32, y: f32, width: f32, height: f32) 
         height,
         rotation: 0.0,
         z_index: 0,
+    });
+
+    serde_json::to_string(&element).unwrap_or_default()
+}
+
+/// Create a video element JSON.
+#[wasm_bindgen(js_name = createVideoElement)]
+#[must_use]
+pub fn create_video_element(
+    stream_id: &str,
+    is_live: bool,
+    mirror: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> String {
+    let element = Element::new(ElementKind::Video {
+        stream_id: stream_id.to_string(),
+        is_live,
+        mirror,
+        crop: None,
+    })
+    .with_transform(Transform {
+        x,
+        y,
+        width,
+        height,
+        rotation: 0.0,
+        z_index: 10, // Video on top by default
     });
 
     serde_json::to_string(&element).unwrap_or_default()

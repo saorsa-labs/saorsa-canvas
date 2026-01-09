@@ -781,7 +781,7 @@ mod tests {
         let pixels = render_chart_to_buffer(&config).expect("Should render");
         assert_eq!(pixels.len(), 400 * 300 * 4);
         // Check not all pixels are the same (chart was drawn)
-        assert!(!pixels.chunks(4).all(|c| c == &[255, 255, 255, 255]));
+        assert!(!pixels.chunks(4).all(|c| c == [255, 255, 255, 255]));
     }
 
     #[test]

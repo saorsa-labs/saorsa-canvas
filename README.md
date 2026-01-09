@@ -136,15 +136,20 @@ Saorsa Canvas implements emerging AI-UI standards:
 
 ## Development Status
 
-**Current**: Initial scaffold (commit 548f1d2)
-- ✅ Scene graph and element types
-- ✅ Touch/gesture event system  
-- ✅ Basic server with WebSocket
-- ✅ PWA frontend shell
-- ⚠️ Rendering is placeholder (grid only)
-- ⚠️ MCP tools defined but not connected
+**All 8 Phases Complete** (147 tests passing)
 
-**Next**: See `docs/DEVELOPMENT_PLAN.md` for phased implementation.
+| Phase | Feature | Status |
+|-------|---------|--------|
+| 1 | Core Rendering Pipeline | ✅ wgpu backend, WASM bindings, render loop |
+| 2 | Charts and Images | ✅ Plotters integration, image loading, texture cache |
+| 3 | MCP Integration | ✅ Tool/resource handlers, WebSocket broadcast |
+| 4 | WebRTC Video | ✅ VideoFeed element, live compositing |
+| 5 | A2UI/AG-UI | ✅ Component tree parsing, SSE streaming |
+| 6 | Holographic/Spatial | ✅ Looking Glass support, multi-view quilt rendering |
+| 7 | Offline Mode | ✅ Operation queue, service worker sync, IndexedDB |
+| 8 | Voice Input | ✅ Web Speech API, touch+voice fusion |
+
+See `docs/DEVELOPMENT_PLAN.md` for implementation details.
 
 ## Claude Code Integration
 

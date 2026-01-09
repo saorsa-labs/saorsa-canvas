@@ -251,11 +251,6 @@
                 <path d="M10 9V5L3 12L10 19V14.9C15 14.9 18.5 16.5 21 20C20 15 17 10 10 9Z"/>
             </svg>
         </button>
-        <button class="tool-btn" data-tool="voice" title="Voice Command">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2S9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17.91 11C17.91 14 15.28 16.18 12 16.18S6.09 14 6.09 11H4C4 14.72 7.28 17.77 11 18.11V21H13V18.11C16.72 17.77 20 14.72 20 11H17.91Z"/>
-            </svg>
-        </button>
         <button class="tool-btn" data-tool="add-bar" title="Add Bar Chart">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M3 13h2v8H3v-8zm4-6h2v14H7V7zm4 3h2v11h-2V10zm4-6h2v17h-2V4zm4 9h2v8h-2v-8z"/>
@@ -286,7 +281,30 @@
                 <path d="M5 4v3h5.5v12h3V7H19V4H5z"/>
             </svg>
         </button>
+        <button class="tool-btn" data-tool="add-video" title="Add Video Feed">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+            </svg>
+        </button>
+        <span style="width: 1px; height: 24px; background: rgba(255,255,255,0.2); margin: 0 4px;"></span>
+        <button class="tool-btn" data-tool="holographic" id="holographic-btn" title="Looking Glass Mode">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="voice" id="voice-btn" title="Voice Input">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+        </button>
     </div>
+
+    <!-- Looking Glass Integration -->
+    <script src="./looking-glass.js"></script>
+
+    <!-- Voice Input -->
+    <script src="./voice.js"></script>
 
     <!-- WASM Module -->
     <script type="module">
@@ -295,8 +313,10 @@
             CanvasApp,
             createChartElement,
             createTextElement,
-            createImageElement
+            createImageElement,
+            createVideoElement
         } from './pkg/canvas_app.js';
+        import { videoManager } from './video.js';
 
         (async function() {
             'use strict';
@@ -318,6 +338,11 @@
             let lastFrameTime = performance.now();
             let frameCount = 0;
             let fps = 0;
+            let activeVideoStreams = new Set();
+            let lookingGlassManager = null;
+            let holographicMode = false;
+            let voiceManager = null;
+            let voiceMode = false;
 
             // Initialize WASM module
             async function initWasm() {
@@ -362,9 +387,35 @@
                 }
             }
 
+            // Update video frames from VideoManager to WASM
+            function updateVideoFrames() {
+                if (!canvasApp) return;
+
+                const now = performance.now();
+
+                for (const streamId of activeVideoStreams) {
+                    if (videoManager.isStreamReady(streamId)) {
+                        const frameBytes = videoManager.getVideoFrameBytes(streamId);
+                        if (frameBytes) {
+                            const info = videoManager.getStreamInfo(streamId);
+                            canvasApp.updateVideoFrame(
+                                streamId,
+                                frameBytes,
+                                info.width,
+                                info.height,
+                                now
+                            );
+                        }
+                    }
+                }
+            }
+
             // Animation loop
             function animate() {
                 if (canvasApp) {
+                    // Push video frames to WASM
+                    updateVideoFrames();
+
                     canvasApp.render();
 
                     // Update FPS counter
@@ -474,6 +525,16 @@
                     y: y,
                     tool: currentTool
                 });
+
+                // Register touch for voice fusion
+                if (voiceManager && voiceMode) {
+                    const touchedElement = canvasApp ? canvasApp.handleTouch(x, y, 'start') : null;
+                    voiceManager.registerTouch({
+                        x: x,
+                        y: y,
+                        elementId: touchedElement?.id || null
+                    });
+                }
             }
 
             function handleTouchMove(e) {
@@ -537,6 +598,16 @@
                     y: y,
                     tool: currentTool
                 });
+
+                // Register click for voice fusion
+                if (voiceManager && voiceMode) {
+                    const touchedElement = canvasApp ? canvasApp.handleClick(x, y) : null;
+                    voiceManager.registerTouch({
+                        x: x,
+                        y: y,
+                        elementId: touchedElement?.id || null
+                    });
+                }
             }
 
             function handleMouseMove(e) {
@@ -638,17 +709,64 @@
                         const textJson = createTextElement('Hello from AI', baseX, baseY + 220, 24, '#333333');
                         canvasApp.addElement(textJson);
                         break;
+                    case 'add-video':
+                        addVideoElement();
+                        break;
+                }
+            }
+
+            // Add a video element from local camera
+            async function addVideoElement() {
+                if (!canvasApp) return;
+
+                try {
+                    // Request camera access
+                    const streamId = await videoManager.addLocalCamera({ mirror: true });
+                    activeVideoStreams.add(streamId);
+
+                    // Get video dimensions
+                    const info = videoManager.getStreamInfo(streamId);
+
+                    // Create video element in canvas
+                    const canvas = document.getElementById('main-canvas');
+                    const videoJson = createVideoElement(
+                        streamId,
+                        true, // is_live
+                        true, // mirror
+                        50,   // x
+                        50,   // y
+                        info.width > 640 ? 640 : info.width, // cap width
+                        info.height > 480 ? 480 : info.height // cap height
+                    );
+                    canvasApp.addElement(videoJson);
+
+                    console.log('[Saorsa] Local camera added:', streamId);
+                } catch (error) {
+                    console.error('[Saorsa] Failed to add video:', error);
+                    alert('Failed to access camera: ' + error.message);
                 }
             }
 
             // Tool selection
             document.querySelectorAll('.tool-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
+                btn.addEventListener('click', async () => {
                     const tool = btn.dataset.tool;
 
                     // Handle add tools immediately
                     if (tool.startsWith('add-')) {
                         handleToolAction(tool);
+                        return;
+                    }
+
+                    // Handle holographic mode toggle
+                    if (tool === 'holographic') {
+                        await toggleHolographicMode();
+                        return;
+                    }
+
+                    // Handle voice mode toggle
+                    if (tool === 'voice') {
+                        toggleVoiceMode();
                         return;
                     }
 
@@ -662,6 +780,193 @@
                     currentTool = tool;
                 });
             });
+
+            // Toggle holographic mode for Looking Glass displays
+            async function toggleHolographicMode() {
+                const btn = document.getElementById('holographic-btn');
+
+                if (!holographicMode) {
+                    // Initialize Looking Glass Manager if needed
+                    if (!lookingGlassManager && window.LookingGlass) {
+                        lookingGlassManager = new window.LookingGlass.Manager({
+                            preset: 'portrait',
+                            autoConnect: true,
+                            debug: true
+                        });
+
+                        lookingGlassManager.on('connected', (info) => {
+                            console.log('Looking Glass connected:', info);
+                            updateStatus(`Looking Glass: ${info.displayName || 'Connected'}`);
+                        });
+
+                        lookingGlassManager.on('disconnected', () => {
+                            console.log('Looking Glass disconnected');
+                            updateStatus('Looking Glass: Disconnected');
+                        });
+
+                        lookingGlassManager.on('error', (error) => {
+                            console.error('Looking Glass error:', error);
+                            updateStatus('Looking Glass: Error');
+                        });
+                    }
+
+                    // Start holographic rendering
+                    if (lookingGlassManager) {
+                        const connected = await lookingGlassManager.connect();
+                        if (connected) {
+                            holographicMode = true;
+                            btn.classList.add('active');
+                            btn.style.backgroundColor = '#4CAF50';
+                            console.log('Holographic mode enabled');
+                        } else {
+                            console.log('Looking Glass not available - using simulation mode');
+                            holographicMode = true;
+                            btn.classList.add('active');
+                            btn.style.backgroundColor = '#FF9800';
+                        }
+                    } else {
+                        console.warn('Looking Glass library not loaded');
+                        updateStatus('Looking Glass: Not available');
+                    }
+                } else {
+                    // Disable holographic mode
+                    holographicMode = false;
+                    btn.classList.remove('active');
+                    btn.style.backgroundColor = '';
+
+                    if (lookingGlassManager) {
+                        lookingGlassManager.disconnect();
+                    }
+                    console.log('Holographic mode disabled');
+                }
+            }
+
+            // Toggle voice input mode
+            function toggleVoiceMode() {
+                const btn = document.getElementById('voice-btn');
+
+                if (!voiceMode) {
+                    // Initialize VoiceManager if needed
+                    if (!voiceManager && window.VoiceManager) {
+                        voiceManager = new window.VoiceManager({
+                            language: 'en-US',
+                            continuous: true,
+                            interimResults: true,
+                            fusionWindowMs: 2000
+                        });
+
+                        // Handle voice commands
+                        voiceManager.onCommand = (command, transcript) => {
+                            console.log('Voice command:', command, transcript);
+                            handleVoiceCommand(command);
+                        };
+
+                        // Handle fused touch+voice intents
+                        voiceManager.onFusedIntent = (intent) => {
+                            console.log('Fused intent:', intent);
+                            handleFusedIntent(intent);
+                        };
+
+                        // Handle status changes
+                        voiceManager.onStatusChange = (status, error) => {
+                            if (status === 'listening') {
+                                btn.style.backgroundColor = '#4CAF50';
+                                updateStatus('Voice: Listening');
+                            } else if (status === 'stopped') {
+                                btn.style.backgroundColor = voiceMode ? '#FF9800' : '';
+                                updateStatus('Voice: Stopped');
+                            } else if (status === 'error') {
+                                btn.style.backgroundColor = '#f44336';
+                                updateStatus(`Voice: ${error?.message || 'Error'}`);
+                            }
+                        };
+                    }
+
+                    // Start voice recognition
+                    if (voiceManager) {
+                        if (voiceManager.isSupported) {
+                            voiceManager.start();
+                            voiceMode = true;
+                            btn.classList.add('active');
+                            btn.style.backgroundColor = '#4CAF50';
+                            console.log('Voice mode enabled');
+                            updateStatus('Voice: Listening');
+                        } else {
+                            console.warn('Voice recognition not supported');
+                            updateStatus('Voice: Not supported');
+                        }
+                    } else {
+                        console.warn('VoiceManager not loaded');
+                        updateStatus('Voice: Not available');
+                    }
+                } else {
+                    // Disable voice mode
+                    voiceMode = false;
+                    btn.classList.remove('active');
+                    btn.style.backgroundColor = '';
+
+                    if (voiceManager) {
+                        voiceManager.stop();
+                    }
+                    console.log('Voice mode disabled');
+                    updateStatus('Voice: Disabled');
+                }
+            }
+
+            // Handle voice commands
+            function handleVoiceCommand(command) {
+                if (!canvasApp) return;
+
+                switch (command.action) {
+                    case 'undo':
+                        console.log('Executing undo');
+                        break;
+                    case 'redo':
+                        console.log('Executing redo');
+                        break;
+                    case 'selectAll':
+                        console.log('Selecting all elements');
+                        break;
+                    case 'deselectAll':
+                        console.log('Deselecting all elements');
+                        break;
+                    case 'delete':
+                        console.log('Deleting selected element');
+                        break;
+                    case 'zoom':
+                        console.log('Zooming', command.direction);
+                        break;
+                    case 'add':
+                        handleToolAction(`add-${command.elementType}`);
+                        break;
+                    case 'setColor':
+                        console.log('Setting color to', command.color);
+                        break;
+                    case 'resize':
+                        console.log('Resizing', command.direction);
+                        break;
+                    case 'move':
+                        console.log('Moving', command.direction);
+                        break;
+                    case 'save':
+                        console.log('Saving canvas');
+                        break;
+                    default:
+                        console.log('Unknown command:', command);
+                }
+            }
+
+            // Handle fused touch+voice intents
+            function handleFusedIntent(intent) {
+                if (!canvasApp) return;
+
+                console.log(`Fused intent at (${intent.touch.x}, ${intent.touch.y}): "${intent.transcript}"`);
+
+                // If we have a parsed command and a target element, apply it
+                if (intent.command && intent.touch.elementId) {
+                    console.log(`Applying ${intent.command.action} to element ${intent.touch.elementId}`);
+                }
+            }
 
             // Initialize
             const wasmLoaded = await initWasm();

@@ -22,11 +22,17 @@
 pub mod backend;
 pub mod chart;
 pub mod error;
+pub mod holographic;
 pub mod image;
+pub mod quilt;
+pub mod spatial;
 pub mod texture_cache;
 
 pub use backend::RenderBackend;
 pub use error::{RenderError, RenderResult};
+pub use holographic::{HolographicRenderResult, HolographicRenderer, HolographicStats, HoloPlayInfo};
+pub use quilt::{LookingGlassPreset, Quilt, QuiltRenderSettings, QuiltRenderTarget, QuiltView};
+pub use spatial::{Camera, HolographicConfig, Mat4, QuiltRenderInfo, Vec3};
 
 use canvas_core::Scene;
 

@@ -17,6 +17,7 @@ wasm = ["wasm-bindgen", "web-sys", "js-sys"]
 canvas-core = { path = "../canvas-core" }
 
 # Serialization
+serde.workspace = true
 serde_json.workspace = true
 
 # Error handling

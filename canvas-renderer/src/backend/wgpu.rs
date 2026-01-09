@@ -417,6 +417,7 @@ impl WgpuBackend {
             ElementKind::Image { .. } => [0.95, 0.95, 0.95, 1.0], // Light gray placeholder
             ElementKind::Model3D { .. } => [0.8, 0.9, 0.8, 1.0], // Light green for 3D
             ElementKind::Video { .. } => [0.2, 0.2, 0.2, 1.0],  // Dark for video
+            ElementKind::OverlayLayer { opacity, .. } => [1.0, 1.0, 1.0, *opacity], // Transparent
             ElementKind::Text { color, .. } => {
                 // Parse hex color
                 Self::parse_hex_color(color).unwrap_or([0.0, 0.0, 0.0, 1.0])

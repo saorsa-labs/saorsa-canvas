@@ -19,7 +19,7 @@ pub enum TouchPhase {
 }
 
 /// A single touch point.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TouchPoint {
     /// Touch identifier (for multi-touch).
     pub id: u32,
@@ -34,7 +34,7 @@ pub struct TouchPoint {
 }
 
 /// A touch event with one or more touch points.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TouchEvent {
     /// Phase of this touch event.
     pub phase: TouchPhase,
@@ -72,7 +72,7 @@ impl TouchEvent {
 }
 
 /// Recognized gestures from touch input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "gesture", content = "data")]
 #[allow(missing_docs)] // Enum variant fields documented at variant level
 pub enum Gesture {
@@ -140,7 +140,7 @@ pub enum Gesture {
 }
 
 /// All input events the canvas can receive.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum InputEvent {
     /// Raw touch event.
@@ -183,7 +183,7 @@ pub enum InputEvent {
 }
 
 /// Keyboard modifiers.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct KeyModifiers {
     /// Shift key pressed.

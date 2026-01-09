@@ -72,7 +72,21 @@ impl Canvas2DBackend {
                 );
             }
             ElementKind::Video { stream_id, .. } => {
-                tracing::trace!("Render video placeholder for stream {}", stream_id);
+                tracing::trace!(
+                    "Render video stream {} at ({}, {}) size {}x{}",
+                    stream_id,
+                    t.x,
+                    t.y,
+                    t.width,
+                    t.height
+                );
+            }
+            ElementKind::OverlayLayer { children, opacity } => {
+                tracing::trace!(
+                    "Render overlay layer with {} children at opacity {}",
+                    children.len(),
+                    opacity
+                );
             }
             ElementKind::Group { children } => {
                 tracing::trace!("Render group with {} children", children.len());

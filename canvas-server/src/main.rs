@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     extract::{
@@ -17,6 +17,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use canvas_core::Scene;
 use canvas_mcp::{CanvasMcpServer, JsonRpcRequest, JsonRpcResponse};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
@@ -27,6 +28,7 @@ use tower_http::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod agui;
 mod routes;
 
 /// Scene change event for WebSocket broadcast.
@@ -69,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     // Determine the paths for static files
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let web_dir = manifest_dir.join("../web");
-    let pkg_dir = manifest_dir.join("../canvas-app/pkg");
+    let pkg_dir = manifest_dir.join("../web/pkg");
 
     tracing::info!("Serving web files from: {:?}", web_dir);
     tracing::info!("Serving WASM package from: {:?}", pkg_dir);
@@ -102,11 +104,23 @@ async fn main() -> anyhow::Result<()> {
         let _ = scene_tx_clone.send(event);
     });
 
+    // Create shared scene for AG-UI
+    let scene = Arc::new(RwLock::new(Scene::new(800.0, 600.0)));
+
+    // Create AG-UI state
+    let agui_state = agui::AgUiState::new(scene);
+
     // Create shared state with MCP server
     let state = AppState {
         mcp: Arc::new(mcp),
         scene_tx,
     };
+
+    // Build AG-UI router
+    let agui_router = Router::new()
+        .route("/stream", get(agui::stream_handler))
+        .route("/render", post(agui::render_handler))
+        .with_state(agui_state);
 
     // Build the router
     let app = Router::new()
@@ -118,6 +132,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/scene",
             get(routes::get_scene).post(routes::update_scene),
         )
+        // AG-UI endpoints
+        .nest("/ag-ui", agui_router)
         // Serve WASM package at /pkg
         .nest_service("/pkg", pkg_service)
         // Serve manifest.json and sw.js from web directory
