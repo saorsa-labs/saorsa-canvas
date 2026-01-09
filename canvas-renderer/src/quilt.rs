@@ -466,7 +466,10 @@ mod tests {
 
         let expected = [0.1_f32, 0.1, 0.1, 1.0];
         for (i, (&actual, &exp)) in settings.clear_color.iter().zip(expected.iter()).enumerate() {
-            assert!((actual - exp).abs() < f32::EPSILON, "clear_color[{i}] mismatch");
+            assert!(
+                (actual - exp).abs() < f32::EPSILON,
+                "clear_color[{i}] mismatch"
+            );
         }
         assert!(!settings.wireframe);
         assert!(settings.depth_test);
@@ -485,7 +488,10 @@ mod tests {
 
     #[test]
     fn test_looking_glass_preset_resolutions() {
-        assert_eq!(LookingGlassPreset::Portrait.display_resolution(), (1536, 2048));
+        assert_eq!(
+            LookingGlassPreset::Portrait.display_resolution(),
+            (1536, 2048)
+        );
         assert_eq!(LookingGlassPreset::LG16.display_resolution(), (3840, 2160));
         assert_eq!(LookingGlassPreset::LG32.display_resolution(), (7680, 4320));
         assert_eq!(LookingGlassPreset::Go.display_resolution(), (1440, 2560));
@@ -493,7 +499,10 @@ mod tests {
 
     #[test]
     fn test_looking_glass_preset_names() {
-        assert_eq!(LookingGlassPreset::Portrait.name(), "Looking Glass Portrait");
+        assert_eq!(
+            LookingGlassPreset::Portrait.name(),
+            "Looking Glass Portrait"
+        );
         assert_eq!(LookingGlassPreset::LG16.name(), "Looking Glass 16\"");
         assert_eq!(LookingGlassPreset::LG32.name(), "Looking Glass 32\"");
         assert_eq!(LookingGlassPreset::Go.name(), "Looking Glass Go");

@@ -279,8 +279,7 @@ mod tests {
             }
         }"#;
 
-        let request: RenderA2UIRequest =
-            serde_json::from_str(json).expect("should deserialize");
+        let request: RenderA2UIRequest = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(request.session_id, "default");
         assert!(!request.clear);
     }
@@ -295,8 +294,7 @@ mod tests {
             "clear": true
         }"#;
 
-        let request: RenderA2UIRequest =
-            serde_json::from_str(json).expect("should deserialize");
+        let request: RenderA2UIRequest = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(request.session_id, "custom");
         assert!(request.clear);
     }
@@ -344,10 +342,8 @@ mod tests {
         let state = AgUiState::new(scene.clone());
 
         // First render
-        let tree1 = A2UITree::from_json(
-            r#"{"root": { "component": "text", "content": "First" }}"#,
-        )
-        .expect("should parse");
+        let tree1 = A2UITree::from_json(r#"{"root": { "component": "text", "content": "First" }}"#)
+            .expect("should parse");
 
         state.render_a2ui(&RenderA2UIRequest {
             tree: tree1,
@@ -356,10 +352,9 @@ mod tests {
         });
 
         // Second render without clear
-        let tree2 = A2UITree::from_json(
-            r#"{"root": { "component": "text", "content": "Second" }}"#,
-        )
-        .expect("should parse");
+        let tree2 =
+            A2UITree::from_json(r#"{"root": { "component": "text", "content": "Second" }}"#)
+                .expect("should parse");
 
         let response = state.render_a2ui(&RenderA2UIRequest {
             tree: tree2,
@@ -381,10 +376,8 @@ mod tests {
         let state = AgUiState::new(scene.clone());
 
         // First render
-        let tree1 = A2UITree::from_json(
-            r#"{"root": { "component": "text", "content": "First" }}"#,
-        )
-        .expect("should parse");
+        let tree1 = A2UITree::from_json(r#"{"root": { "component": "text", "content": "First" }}"#)
+            .expect("should parse");
 
         state.render_a2ui(&RenderA2UIRequest {
             tree: tree1,
@@ -393,10 +386,9 @@ mod tests {
         });
 
         // Second render WITH clear
-        let tree2 = A2UITree::from_json(
-            r#"{"root": { "component": "text", "content": "Second" }}"#,
-        )
-        .expect("should parse");
+        let tree2 =
+            A2UITree::from_json(r#"{"root": { "component": "text", "content": "Second" }}"#)
+                .expect("should parse");
 
         let response = state.render_a2ui(&RenderA2UIRequest {
             tree: tree2,

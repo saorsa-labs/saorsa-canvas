@@ -431,7 +431,8 @@ mod tests {
         let mut cache = TextureCache::new();
 
         // First call should invoke loader
-        let data = cache.get_or_insert_with("lazy", || create_solid_color(5, 5, 128, 128, 128, 255));
+        let data =
+            cache.get_or_insert_with("lazy", || create_solid_color(5, 5, 128, 128, 128, 255));
 
         assert_eq!(data.width, 5);
         assert!(cache.contains("lazy"));

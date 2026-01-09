@@ -265,8 +265,9 @@ impl CanvasMcpServer {
         let mut sessions = self.sessions.write().await;
 
         // Get or create session
-        let state = sessions.entry(session_id.clone()).or_insert_with(|| {
-            SessionState {
+        let state = sessions
+            .entry(session_id.clone())
+            .or_insert_with(|| SessionState {
                 session: CanvasSession {
                     id: session_id.clone(),
                     name: format!("Session {session_id}"),
@@ -277,8 +278,7 @@ impl CanvasMcpServer {
                     element_count: 0,
                 },
                 scene: Scene::new(800.0, 600.0),
-            }
-        });
+            });
 
         // Create element from content
         let element = match &params.content {

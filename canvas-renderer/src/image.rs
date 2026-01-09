@@ -154,9 +154,7 @@ fn urlencoding_decode(input: &str) -> RenderResult<Vec<u8>> {
                     continue;
                 }
             }
-            return Err(RenderError::Resource(
-                "Invalid URL encoding".to_string(),
-            ));
+            return Err(RenderError::Resource("Invalid URL encoding".to_string()));
         }
         result.push(c as u8);
     }
@@ -168,7 +166,11 @@ fn urlencoding_decode(input: &str) -> RenderResult<Vec<u8>> {
 ///
 /// Returns `None` if the image is already smaller than the max dimensions.
 #[must_use]
-pub fn resize_to_fit(texture: &TextureData, max_width: u32, max_height: u32) -> Option<TextureData> {
+pub fn resize_to_fit(
+    texture: &TextureData,
+    max_width: u32,
+    max_height: u32,
+) -> Option<TextureData> {
     if texture.width <= max_width && texture.height <= max_height {
         return None;
     }

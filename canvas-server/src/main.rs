@@ -202,10 +202,7 @@ async fn websocket_handler(
 }
 
 /// Handle a WebSocket connection.
-async fn handle_socket(
-    socket: WebSocket,
-    mut scene_rx: broadcast::Receiver<SceneChangeEvent>,
-) {
+async fn handle_socket(socket: WebSocket, mut scene_rx: broadcast::Receiver<SceneChangeEvent>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Send welcome message

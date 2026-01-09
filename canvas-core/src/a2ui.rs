@@ -320,7 +320,13 @@ impl A2UIConverter {
         (max_width, max_height)
     }
 
-    fn convert_text(&mut self, content: &str, style: Option<&A2UIStyle>, x: f32, y: f32) -> Element {
+    fn convert_text(
+        &mut self,
+        content: &str,
+        style: Option<&A2UIStyle>,
+        x: f32,
+        y: f32,
+    ) -> Element {
         let font_size = style.and_then(|s| s.font_size).unwrap_or(16.0);
         let color = style
             .and_then(|s| s.color.clone())

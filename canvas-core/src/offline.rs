@@ -347,10 +347,7 @@ mod tests {
         let mut queue = OfflineQueue::new();
         let id = ElementId::new();
 
-        queue.enqueue(Operation::RemoveElement {
-            id,
-            timestamp: 1,
-        });
+        queue.enqueue(Operation::RemoveElement { id, timestamp: 1 });
 
         let ops = queue.take_pending();
         assert!(queue.is_empty());

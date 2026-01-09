@@ -123,14 +123,14 @@ fn parse_hex_color(hex: &str) -> RGBColor {
 
 /// Default color palette for charts.
 const PALETTE: &[RGBColor] = &[
-    RGBColor(54, 162, 235),   // Blue
-    RGBColor(255, 99, 132),   // Red
-    RGBColor(75, 192, 192),   // Teal
-    RGBColor(255, 205, 86),   // Yellow
-    RGBColor(153, 102, 255),  // Purple
-    RGBColor(255, 159, 64),   // Orange
-    RGBColor(201, 203, 207),  // Gray
-    RGBColor(100, 181, 246),  // Light Blue
+    RGBColor(54, 162, 235),  // Blue
+    RGBColor(255, 99, 132),  // Red
+    RGBColor(75, 192, 192),  // Teal
+    RGBColor(255, 205, 86),  // Yellow
+    RGBColor(153, 102, 255), // Purple
+    RGBColor(255, 159, 64),  // Orange
+    RGBColor(201, 203, 207), // Gray
+    RGBColor(100, 181, 246), // Light Blue
 ];
 
 /// Get color for a series index.
@@ -183,14 +183,18 @@ pub fn render_chart_to_buffer(config: &ChartConfig) -> RenderResult<Vec<u8>> {
         rgba_buffer.push(chunk[0]); // R
         rgba_buffer.push(chunk[1]); // G
         rgba_buffer.push(chunk[2]); // B
-        rgba_buffer.push(255);      // A
+        rgba_buffer.push(255); // A
     }
 
     Ok(rgba_buffer)
 }
 
 /// Render a bar chart.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn render_bar_chart(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     config: &ChartConfig,
@@ -253,10 +257,7 @@ fn render_bar_chart(
                 let x0 = i as f64 + offset - bar_width / 2.0 + 0.5;
                 let x1 = i as f64 + offset + bar_width / 2.0 + 0.5;
                 Rectangle::new(
-                    [
-                        (x0 as usize, 0.0_f64.max(y_min)),
-                        (x1 as usize, point.y),
-                    ],
+                    [(x0 as usize, 0.0_f64.max(y_min)), (x1 as usize, point.y)],
                     color.filled(),
                 )
             }))
@@ -347,7 +348,9 @@ fn render_line_chart(
             .draw_series(LineSeries::new(points, color.stroke_width(2)))
             .map_err(|e| RenderError::Frame(format!("Failed to draw line: {e}")))?
             .label(&series.name)
-            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], color.stroke_width(2)));
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 15, y)], color.stroke_width(2))
+            });
     }
 
     if config.show_legend && config.series.len() > 1 {
@@ -441,7 +444,12 @@ fn render_scatter_chart(
 }
 
 /// Render a pie or donut chart.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn render_pie_chart(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     config: &ChartConfig,
@@ -622,7 +630,10 @@ pub fn parse_chart_config(
         .parse()
         .map_err(|e: String| RenderError::Resource(e))?;
 
-    let title = data.get("title").and_then(serde_json::Value::as_str).map(String::from);
+    let title = data
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
     let x_label = data
         .get("x_label")
         .and_then(serde_json::Value::as_str)
@@ -733,8 +744,14 @@ fn parse_series(value: &serde_json::Value, index: usize) -> DataSeries {
 /// Parse a data point from JSON.
 fn parse_data_point(value: &serde_json::Value) -> DataPoint {
     DataPoint {
-        x: value.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-        y: value.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+        x: value
+            .get("x")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
+        y: value
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
         label: value
             .get("label")
             .and_then(serde_json::Value::as_str)

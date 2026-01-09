@@ -42,7 +42,9 @@ pub use a2ui::{A2UINode, A2UIStyle, A2UITree, ConversionResult};
 pub use element::{CropRect, Element, ElementId, ElementKind, ImageFormat, Transform};
 pub use error::{CanvasError, CanvasResult};
 pub use event::{InputEvent, TouchEvent, TouchPhase, TouchPoint};
-pub use fusion::{FusedIntent, FusionConfig, FusionResult, InputFusion, VoiceEvent, VoiceOnlyIntent};
+pub use fusion::{
+    FusedIntent, FusionConfig, FusionResult, InputFusion, VoiceEvent, VoiceOnlyIntent,
+};
 pub use offline::{ConflictResolution, ConflictStrategy, OfflineQueue, Operation, SyncResult};
 pub use scene::Scene;
 pub use state::{CanvasState, ConnectionStatus};

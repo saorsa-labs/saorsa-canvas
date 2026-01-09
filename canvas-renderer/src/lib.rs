@@ -30,7 +30,9 @@ pub mod texture_cache;
 
 pub use backend::RenderBackend;
 pub use error::{RenderError, RenderResult};
-pub use holographic::{HolographicRenderResult, HolographicRenderer, HolographicStats, HoloPlayInfo};
+pub use holographic::{
+    HoloPlayInfo, HolographicRenderResult, HolographicRenderer, HolographicStats,
+};
 pub use quilt::{LookingGlassPreset, Quilt, QuiltRenderSettings, QuiltRenderTarget, QuiltView};
 pub use spatial::{Camera, HolographicConfig, Mat4, QuiltRenderInfo, Vec3};
 

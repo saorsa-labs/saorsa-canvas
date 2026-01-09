@@ -399,10 +399,10 @@ impl CanvasApp {
         let mut rgba = Vec::with_capacity(pixel_count * 4);
 
         for i in 0..pixel_count {
-            rgba.push(rgb[i * 3]);     // R
+            rgba.push(rgb[i * 3]); // R
             rgba.push(rgb[i * 3 + 1]); // G
             rgba.push(rgb[i * 3 + 2]); // B
-            rgba.push(255);            // A (fully opaque)
+            rgba.push(255); // A (fully opaque)
         }
 
         rgba
@@ -418,7 +418,10 @@ impl CanvasApp {
         match ImageData::new_with_u8_clamped_array_and_sh(clamped, width, height) {
             Ok(image_data) => {
                 // Draw to canvas
-                if let Err(e) = self.ctx.put_image_data(&image_data, f64::from(x), f64::from(y)) {
+                if let Err(e) = self
+                    .ctx
+                    .put_image_data(&image_data, f64::from(x), f64::from(y))
+                {
                     tracing::warn!("Failed to draw image data: {:?}", e);
                 }
             }
@@ -502,8 +505,7 @@ impl CanvasApp {
                     if let Some(window) = web_sys::window() {
                         if let Some(document) = window.document() {
                             if let Ok(temp_canvas) = document.create_element("canvas") {
-                                if let Ok(temp_canvas) =
-                                    temp_canvas.dyn_into::<HtmlCanvasElement>()
+                                if let Ok(temp_canvas) = temp_canvas.dyn_into::<HtmlCanvasElement>()
                                 {
                                     temp_canvas.set_width(frame.width);
                                     temp_canvas.set_height(frame.height);
@@ -516,13 +518,15 @@ impl CanvasApp {
                                             let _ = temp_ctx.put_image_data(&image_data, 0.0, 0.0);
 
                                             // Draw scaled to main canvas
-                                            let _ = self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
-                                                &temp_canvas,
-                                                f64::from(t.x),
-                                                f64::from(t.y),
-                                                f64::from(t.width),
-                                                f64::from(t.height),
-                                            );
+                                            let _ = self
+                                                .ctx
+                                                .draw_image_with_html_canvas_element_and_dw_and_dh(
+                                                    &temp_canvas,
+                                                    f64::from(t.x),
+                                                    f64::from(t.y),
+                                                    f64::from(t.width),
+                                                    f64::from(t.height),
+                                                );
                                         }
                                     }
                                 }
@@ -560,9 +564,7 @@ impl CanvasApp {
         let _ = self
             .ctx
             .fill_text(&format!("Video: {stream_id}"), center_x, center_y - 10.0);
-        let _ = self
-            .ctx
-            .fill_text("No signal", center_x, center_y + 10.0);
+        let _ = self.ctx.fill_text("No signal", center_x, center_y + 10.0);
 
         // Reset text alignment
         self.ctx.set_text_align("start");

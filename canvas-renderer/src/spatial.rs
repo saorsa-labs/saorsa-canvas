@@ -199,8 +199,7 @@ impl Mat4 {
         for row in 0..4 {
             for col in 0..4 {
                 for k in 0..4 {
-                    result[col * 4 + row] +=
-                        self.data[k * 4 + row] * other.data[col * 4 + k];
+                    result[col * 4 + row] += self.data[k * 4 + row] * other.data[col * 4 + k];
                 }
             }
         }
@@ -553,7 +552,7 @@ mod tests {
     fn test_mat4_perspective() {
         let proj = Mat4::perspective(
             std::f32::consts::FRAC_PI_4, // 45 degrees
-            1.0,                          // square aspect
+            1.0,                         // square aspect
             0.1,
             100.0,
         );
@@ -691,8 +690,7 @@ mod tests {
 
         // Center camera should have similar position to base
         // (small offset due to discrete view count)
-        let distance_from_base =
-            center_cam.position.sub(&base.position).length();
+        let distance_from_base = center_cam.position.sub(&base.position).length();
         assert!(distance_from_base < 0.5);
     }
 
