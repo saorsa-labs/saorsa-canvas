@@ -1,33 +1,39 @@
 # Saorsa Canvas Skill
 
-Display visual content (charts, images, 3D models) through a universal canvas that works on any device.
+Display visual content through a universal AI canvas that works on any device.
 
-## Trigger
+## Overview
 
-Invoke when the user asks to:
+Saorsa Canvas is the visual presentation layer for AI agents. When an AI needs to show something—charts, images, video, 3D models—it renders here. The canvas runs on phones, desktops, holographic displays, and terminals.
+
+**Key Concept**: The AI controls the canvas. Users observe and provide feedback through touch + voice.
+
+## When to Use
+
+Invoke this skill when the user asks to:
 - Display a chart, graph, or visualization
 - Show an image or diagram
 - Render a 3D model
 - Create a visual presentation
 - Start a video call or screen share
+- Annotate or mark up visual content
 
-## Usage
-
-### Display a Chart
+## Quick Start
 
 ```bash
 # Start the canvas server
-saorsa-canvas &
+cd ~/Desktop/Devel/projects/saorsa-canvas
+cargo run -p canvas-server
 
-# Server will output: "Open http://localhost:9473 in your browser"
+# Server starts on http://localhost:9473
+# Open in browser to see the canvas
 ```
 
-Then use the MCP tools:
-- `canvas_render` - Render content to the canvas
-- `canvas_interact` - Handle touch/voice input
-- `canvas_export` - Export canvas to image/PDF
+## MCP Tools
 
-### Example: Bar Chart
+### canvas_render
+
+Render content to the canvas:
 
 ```json
 {
@@ -39,69 +45,127 @@ Then use the MCP tools:
       "data": {
         "chart_type": "bar",
         "data": {
-          "labels": ["Jan", "Feb", "Mar"],
-          "values": [10, 20, 15]
+          "labels": ["Q1", "Q2", "Q3", "Q4"],
+          "values": [100, 150, 120, 180]
         },
-        "title": "Monthly Sales"
+        "title": "Quarterly Revenue"
       }
     }
   }
 }
 ```
 
-### Example: Image
+**Content Types**:
+- `Chart` - bar, line, pie, scatter
+- `Image` - PNG, JPEG, SVG, WebP (URL or base64)
+- `Model3D` - glTF models
+- `Video` - WebRTC stream ID
+- `Text` - Labels and annotations
+
+### canvas_interact
+
+Report user interaction (touch + voice fusion):
 
 ```json
 {
-  "tool": "canvas_render",
+  "tool": "canvas_interact",
   "params": {
     "session_id": "default",
-    "content": {
-      "type": "Image",
+    "interaction": {
+      "type": "Voice",
       "data": {
-        "src": "https://example.com/diagram.png",
-        "alt": "System architecture diagram"
+        "transcript": "Make this bar red",
+        "context_element": "bar-2"
       }
     }
+  }
+}
+```
+
+### canvas_export
+
+Export canvas to file:
+
+```json
+{
+  "tool": "canvas_export",
+  "params": {
+    "session_id": "default",
+    "format": "png",
+    "quality": 90
   }
 }
 ```
 
 ## Touch + Voice Interaction
 
-When the user touches the canvas while speaking:
+The canvas fuses touch and voice input for spatial intent:
 
-1. Canvas captures touch coordinates and element ID
-2. Voice transcript is captured
-3. Both are sent to the AI via `canvas_interact`
-4. AI interprets "change THIS part" with spatial context
-
-Example interaction flow:
 ```
-User: [touches chart bar] "Make this one red"
-Canvas → AI: {touch: {x: 150, y: 200, element: "bar-2"}, voice: "Make this one red"}
-AI → Canvas: {update: {element: "bar-2", style: {fill: "#ff0000"}}}
+User touches element while saying: "Change THIS to blue"
+                    ↓
+Canvas captures: { touch: {element: "chart-bar-3"}, voice: "Change THIS to blue" }
+                    ↓
+AI understands: Update element chart-bar-3 color to blue
 ```
 
-## Offline Mode
+This makes "THIS", "HERE", and "THAT" meaningful in conversation.
 
-When disconnected from AI:
-- View, pan, zoom still work
-- Touch highlights elements but doesn't trigger AI actions
-- Changes are queued for sync when reconnected
-- Banner shows "Offline mode - some features limited"
+## Project Structure
 
-## Building
+```
+saorsa-canvas/
+├── canvas-core/       # WASM core: scene graph, events
+├── canvas-renderer/   # GPU rendering (wgpu)
+├── canvas-server/     # Local HTTP/WebSocket server
+├── canvas-mcp/        # MCP tool implementations
+├── canvas-skill/      # This skill file
+├── web/               # PWA frontend
+└── docs/
+    ├── VISION.md           # Architecture and philosophy
+    ├── DEVELOPMENT_PLAN.md # Implementation roadmap
+    └── SPECS.md            # Standards reference
+```
 
+## Development
+
+See `CLAUDE.md` in the project root for development instructions.
+
+**Build**:
 ```bash
-cd saorsa-canvas
 cargo build --release
 ```
 
-The binary is at `target/release/saorsa-canvas`.
+**Test**:
+```bash
+cargo test --workspace
+```
 
-## Requirements
+**Run**:
+```bash
+cargo run -p canvas-server
+# Open http://localhost:9473
+```
 
-- Rust 1.75+ with 2024 edition
-- Any modern browser (for the PWA)
-- Optional: Terminal with Sixel/Kitty support for inline previews
+## Integration with Communitas
+
+Saorsa Canvas is the visual layer for the Communitas P2P collaboration platform. MCP tools are exposed through the Communitas MCP server, allowing any connected AI agent to render to user canvases.
+
+## Offline Mode
+
+When disconnected:
+- View, pan, zoom still work
+- Interactions queue locally
+- Sync happens on reconnect
+- Banner shows offline status
+
+## Future Capabilities
+
+- **Holographic output**: Looking Glass displays via WebXR
+- **Spatial computing**: VisionOS, Quest, Android XR
+- **Video compositing**: WebRTC feeds as canvas layers
+- **Terminal rendering**: Sixel/Kitty graphics for CLI
+
+---
+
+*Part of Saorsa Labs - Building infrastructure for decentralized AI*

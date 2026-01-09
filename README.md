@@ -1,91 +1,184 @@
 # Saorsa Canvas
 
-**Universal AI Visual Output Canvas**
+**The Universal AI Visual Interface**
 
-A canvas that runs on ANY compute device (x86, ARM, RISC-V), ANY OS, enabling AI to display visual content—charts, 3D models, video calls—wherever you are.
+> *Where AI meets the eye.*
 
-## Vision
+Saorsa Canvas is an AI-native visual surface that runs on any device—from Raspberry Pi to Mac Studio to Looking Glass holographic displays. It's not a traditional UI framework; it's a **Model Context Protocol (MCP) canvas** where AI agents render content and humans participate through voice, touch, and gaze.
 
-When AI needs to show you something, it renders here. Touch the canvas while speaking to interact: "change THIS part" becomes spatially aware.
+## Why This Exists
+
+The current UI paradigm is **human-centric control**: users click buttons, navigate menus, and tell computers *how* to do things.
+
+Saorsa Canvas implements the **third UI paradigm**—intent-based outcome specification:
+- User expresses *what* they want
+- AI determines *how* to achieve it
+- Canvas displays the *result* and captures *feedback*
+
+This is especially powerful for **AI-mediated video calls** where:
+- Your video feed is composited into the canvas, not a separate window
+- You can touch the screen while speaking: "Change THIS part" becomes spatially aware
+- Two users share a synchronized canvas with AI mediating the visual conversation
+
+## Quick Start
+
+```bash
+# Build everything
+cargo build --release
+
+# Run the canvas server
+./target/release/canvas-server
+
+# Open http://localhost:9473 in your browser
+```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     SAORSA CANVAS                                    │
-│                    "Run Anywhere, Render Anywhere"                   │
+│                   "Run Anywhere, Render Anywhere"                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  CORE: WebAssembly + Rust                                            │
-│  - Scene graph, state management, input handling                     │
-│  - Compiles to WASM for true universal portability                   │
+│  PRESENTATION: 2D Screen | Holographic | Spatial XR | Terminal      │
 ├─────────────────────────────────────────────────────────────────────┤
-│  RENDERING: Custom minimal renderer on wgpu                          │
-│  - WebGPU → WebGL2 → 2D fallback                                     │
-│  - Progressive enhancement based on device capabilities              │
+│  RENDERING: wgpu (WebGPU/Vulkan/Metal) → WebGL2 → Canvas2D fallback │
 ├─────────────────────────────────────────────────────────────────────┤
-│  DELIVERY: PWA + Local Server                                        │
-│  - Embedded Axum server (localhost only)                             │
-│  - Works offline, no cloud dependency                                │
+│  CORE: Rust/WASM - Scene graph, input handling, video compositing   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  COMMUNICATION: WebRTC (saorsa-webrtc)                               │
-│  - Bidirectional: touch → AI, render commands ← AI                   │
-│  - Lowest latency for real-time interaction                          │
+│  MCP: Tools (render, interact, export) + Resources (ui:// scheme)   │
+├─────────────────────────────────────────────────────────────────────┤
+│  TRANSPORT: WebSocket (local) | WebRTC (P2P) | HTTP/SSE (agents)    │
 └─────────────────────────────────────────────────────────────────────┘
-```
-
-## Features
-
-- **Universal**: Same WASM runs on desktop, mobile, web, smart glasses
-- **Touch + Voice**: Direct manipulation with voice commands
-- **Offline-first**: Graceful degradation when disconnected
-- **MCP Native**: Extends Communitas MCP for AI integration
-
-## Content Types
-
-| Type | Format | Stage 1 |
-|------|--------|---------|
-| Charts | plotters.rs | ✓ |
-| Images | PNG, JPEG, SVG | ✓ |
-| 3D Models | glTF | ✓ |
-| Video/WebRTC | Live streams | ✓ |
-
-## Quick Start
-
-```bash
-# Build
-cargo build --release
-
-# Run
-./target/release/saorsa-canvas
-
-# Open http://localhost:9473 in your browser
 ```
 
 ## Project Structure
 
 ```
 saorsa-canvas/
-├── canvas-core/       # WASM core (scene graph, state)
-├── canvas-renderer/   # wgpu rendering backend
-├── canvas-server/     # Axum local server
-├── canvas-mcp/        # MCP tools/resources
-├── canvas-skill/      # Claude Code skill
-└── web/               # PWA frontend
+├── canvas-core/       # WASM core: scene graph, elements, events, state
+├── canvas-renderer/   # wgpu rendering backends
+├── canvas-server/     # Axum local server with WebSocket
+├── canvas-mcp/        # MCP tools and resources for AI integration
+├── canvas-skill/      # Claude Code skill for CLI usage
+├── web/               # PWA frontend (touch, voice, offline)
+└── docs/              # Vision, specs, and development plan
+    ├── VISION.md           # Full architectural vision
+    ├── DEVELOPMENT_PLAN.md # Phased implementation for Claude Code
+    └── SPECS.md            # Tracked standards and references
 ```
+
+## Core Concepts
+
+### AI as Primary Controller
+
+The canvas is a display surface that AI agents write to. Humans are collaborators, not operators:
+
+```
+Traditional:  User → clicks button → App responds
+Saorsa:       AI renders → User observes → User gestures/speaks → AI interprets → AI updates
+```
+
+### Touch + Voice = Spatial Intent
+
+When you touch the canvas while speaking, both inputs are fused:
+
+```
+User touches a chart bar while saying: "Make this one red"
+                    ↓
+Canvas captures: { touch: {x: 150, y: 200, element: "bar-2"}, voice: "Make this one red" }
+                    ↓
+AI updates: { element: "bar-2", style: { fill: "#ff0000" } }
+```
+
+### Universal Rendering
+
+Same WASM core renders to:
+- **2D screens** (phone, tablet, desktop, TV)
+- **Holographic displays** (Looking Glass)
+- **Spatial computing** (VisionOS, Quest, Android XR)
+- **Terminal** (sixel/kitty graphics)
+
+## MCP Integration
+
+Saorsa Canvas implements emerging AI-UI standards:
+
+| Tool | Purpose |
+|------|---------|
+| `canvas_render` | Render charts, images, 3D models, video feeds |
+| `canvas_interact` | Report touch/voice input with spatial context |
+| `canvas_export` | Export canvas to PNG, JPEG, SVG, PDF |
+
+```json
+{
+  "tool": "canvas_render",
+  "params": {
+    "session_id": "default",
+    "content": {
+      "type": "Chart",
+      "data": {
+        "chart_type": "bar",
+        "data": { "labels": ["Jan", "Feb"], "values": [10, 20] }
+      }
+    }
+  }
+}
+```
+
+## Content Types
+
+| Type | Format | Rendering |
+|------|--------|-----------|
+| Charts | JSON via plotters | Bar, line, pie, scatter |
+| Images | PNG, JPEG, SVG, WebP | GPU-accelerated textures |
+| 3D Models | glTF | Embedded viewer |
+| Video | WebRTC streams | Live compositing |
+| Text | Markdown/plain | Typography via glyphon |
+
+## Development Status
+
+**Current**: Initial scaffold (commit 548f1d2)
+- ✅ Scene graph and element types
+- ✅ Touch/gesture event system  
+- ✅ Basic server with WebSocket
+- ✅ PWA frontend shell
+- ⚠️ Rendering is placeholder (grid only)
+- ⚠️ MCP tools defined but not connected
+
+**Next**: See `docs/DEVELOPMENT_PLAN.md` for phased implementation.
 
 ## Claude Code Integration
 
 Add as a skill to display visuals from CLI:
 
 ```bash
-# In your ~/.claude/skills/ directory
+# Link the skill
 ln -s /path/to/saorsa-canvas/canvas-skill ~/.claude/skills/canvas
+
+# Now Claude Code can render to the canvas
 ```
+
+## Part of the Saorsa Labs Ecosystem
+
+Saorsa Canvas is the **visual presentation layer** for [Communitas](https://github.com/saorsa-labs/communitas):
+
+```
+Communitas (P2P collaboration)
+    ├── Text/Voice/Video → libp2p / saorsa-webrtc
+    └── Visual Presentation → Saorsa Canvas
+```
+
+## Documentation
+
+- **[VISION.md](docs/VISION.md)** - Full architectural vision and rationale
+- **[DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)** - Phased implementation for Claude Code
+- **[SPECS.md](docs/SPECS.md)** - Tracked standards and external references
 
 ## License
 
 MIT OR Apache-2.0
 
-## Part of Saorsa Labs
+---
 
-Building the infrastructure for decentralized AI.
+*Building the infrastructure for decentralized AI.*
+
+**Saorsa Labs** | [saorsa.io](https://saorsa.io) | [GitHub](https://github.com/saorsa-labs)
