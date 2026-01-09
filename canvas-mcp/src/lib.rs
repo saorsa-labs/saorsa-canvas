@@ -22,7 +22,11 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod resources;
+pub mod server;
 pub mod tools;
+
+// Re-export key types for convenience
+pub use server::{CanvasMcpServer, JsonRpcRequest, JsonRpcResponse};
 
 use serde::{Deserialize, Serialize};
 

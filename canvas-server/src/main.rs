@@ -5,14 +5,19 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
+use canvas_mcp::{CanvasMcpServer, JsonRpcRequest, JsonRpcResponse};
 use futures::{SinkExt, StreamExt};
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -22,6 +27,13 @@ use tower_http::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod routes;
+
+/// Shared application state.
+#[derive(Clone)]
+struct AppState {
+    /// MCP server instance.
+    mcp: Arc<CanvasMcpServer>,
+}
 
 /// Default port for the canvas server.
 const DEFAULT_PORT: u16 = 9473; // "SAOR" on phone keypad
@@ -54,11 +66,17 @@ async fn main() -> anyhow::Result<()> {
     let web_service = ServeDir::new(&web_dir);
     let pkg_service = ServeDir::new(&pkg_dir);
 
+    // Create shared state with MCP server
+    let state = AppState {
+        mcp: Arc::new(CanvasMcpServer::new()),
+    };
+
     // Build the router
     let app = Router::new()
         // API routes
         .route("/health", get(health_handler))
         .route("/ws", get(websocket_handler))
+        .route("/mcp", post(mcp_handler))
         .route(
             "/api/scene",
             get(routes::get_scene).post(routes::update_scene),
@@ -71,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
         // Fallback to index.html for SPA
         .fallback_service(web_service)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     // Bind to localhost ONLY (security requirement)
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -105,10 +124,20 @@ async fn sw_handler() -> impl IntoResponse {
 
 /// Health check endpoint.
 async fn health_handler() -> impl IntoResponse {
-    axum::Json(serde_json::json!({
+    Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+/// MCP JSON-RPC endpoint.
+async fn mcp_handler(
+    State(state): State<AppState>,
+    Json(request): Json<JsonRpcRequest>,
+) -> Json<JsonRpcResponse> {
+    tracing::info!("MCP request: {}", request.method);
+    let response = state.mcp.handle_request(request).await;
+    Json(response)
 }
 
 /// WebSocket handler for real-time communication.
