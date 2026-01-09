@@ -66,6 +66,9 @@ console_error_panic_hook = "0.1"
 plotters = "0.3"
 plotters-canvas = "0.3"
 
+# Image processing
+image = "0.25"
+
 # 3D models (glTF)
 gltf = "1.4"
 

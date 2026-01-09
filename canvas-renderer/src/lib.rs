@@ -22,6 +22,8 @@
 pub mod backend;
 pub mod chart;
 pub mod error;
+pub mod image;
+pub mod texture_cache;
 
 pub use backend::RenderBackend;
 pub use error::{RenderError, RenderResult};
