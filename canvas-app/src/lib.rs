@@ -30,18 +30,31 @@
 #![deny(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+use std::collections::HashMap;
+
 use canvas_core::{
     CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, TouchEvent, TouchPhase,
     TouchPoint, Transform,
 };
+use canvas_renderer::chart::{parse_chart_config, render_chart_to_buffer};
 use wasm_bindgen::prelude::*;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
 /// Initialize the WASM module.
 #[wasm_bindgen(start)]
 pub fn init_wasm() {
     console_error_panic_hook::set_once();
     tracing::info!("Saorsa Canvas WASM initialized");
+}
+
+/// Cached rendered chart data.
+struct RenderedChart {
+    /// RGBA pixel data.
+    data: Vec<u8>,
+    /// Width in pixels.
+    width: u32,
+    /// Height in pixels.
+    height: u32,
 }
 
 /// The main canvas application for WASM.
@@ -55,6 +68,8 @@ pub struct CanvasApp {
     height: u32,
     background_color: String,
     frame_count: u64,
+    /// Cache for rendered charts (keyed by element ID).
+    chart_cache: HashMap<ElementId, RenderedChart>,
 }
 
 #[wasm_bindgen]
@@ -99,6 +114,7 @@ impl CanvasApp {
             height,
             background_color: "#ffffff".to_string(),
             frame_count: 0,
+            chart_cache: HashMap::new(),
         })
     }
 
@@ -109,8 +125,11 @@ impl CanvasApp {
         self.ctx
             .fill_rect(0.0, 0.0, f64::from(self.width), f64::from(self.height));
 
+        // Collect elements to render (to avoid borrow issues)
+        let elements: Vec<_> = self.scene.elements().cloned().collect();
+
         // Render each element
-        for element in self.scene.elements() {
+        for element in &elements {
             self.render_element(element);
         }
 
@@ -263,20 +282,34 @@ impl CanvasApp {
     }
 
     /// Render a single element to the canvas.
-    fn render_element(&self, element: &Element) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_element(&mut self, element: &Element) {
         let t = &element.transform;
 
-        // Set fill color based on element type
-        let fill_color = Self::get_element_color(element);
-        self.ctx.set_fill_style_str(&fill_color);
+        // Handle chart rendering specially
+        if let ElementKind::Chart { chart_type, data } = &element.kind {
+            self.render_chart(element, chart_type, data);
+        } else {
+            // Set fill color based on element type
+            let fill_color = Self::get_element_color(element);
+            self.ctx.set_fill_style_str(&fill_color);
 
-        // Draw the element as a rectangle (placeholder)
-        self.ctx.fill_rect(
-            f64::from(t.x),
-            f64::from(t.y),
-            f64::from(t.width),
-            f64::from(t.height),
-        );
+            // Draw the element as a rectangle (placeholder for non-chart elements)
+            self.ctx.fill_rect(
+                f64::from(t.x),
+                f64::from(t.y),
+                f64::from(t.width),
+                f64::from(t.height),
+            );
+
+            // Draw element type label for non-chart elements
+            self.ctx.set_fill_style_str("#333333");
+            self.ctx.set_font("12px sans-serif");
+            let label = Self::get_element_label(element);
+            let _ = self
+                .ctx
+                .fill_text(&label, f64::from(t.x) + 5.0, f64::from(t.y) + 15.0);
+        }
 
         // Draw selection highlight if selected
         if element.selected {
@@ -289,14 +322,130 @@ impl CanvasApp {
                 f64::from(t.height),
             );
         }
+    }
 
-        // Draw element type label
-        self.ctx.set_fill_style_str("#333333");
-        self.ctx.set_font("12px sans-serif");
-        let label = Self::get_element_label(element);
-        let _ = self
-            .ctx
-            .fill_text(&label, f64::from(t.x) + 5.0, f64::from(t.y) + 15.0);
+    /// Render a chart element using the chart rendering engine.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_chart(&mut self, element: &Element, chart_type: &str, data: &serde_json::Value) {
+        let t = &element.transform;
+        let width = t.width as u32;
+        let height = t.height as u32;
+
+        // Check if we have a cached render
+        if let Some(cached) = self.chart_cache.get(&element.id) {
+            // Use cached render if dimensions match
+            if cached.width == width && cached.height == height {
+                self.draw_rgba_buffer(&cached.data, t.x, t.y, cached.width, cached.height);
+                return;
+            }
+        }
+
+        // Parse chart config and render
+        match parse_chart_config(chart_type, data, width, height) {
+            Ok(config) => {
+                match render_chart_to_buffer(&config) {
+                    Ok(pixel_buffer) => {
+                        // Convert RGB to RGBA
+                        let canvas_buffer = Self::rgb_to_rgba(&pixel_buffer);
+
+                        // Cache the rendered chart
+                        self.chart_cache.insert(
+                            element.id,
+                            RenderedChart {
+                                data: canvas_buffer.clone(),
+                                width,
+                                height,
+                            },
+                        );
+
+                        // Draw to canvas
+                        self.draw_rgba_buffer(&canvas_buffer, t.x, t.y, width, height);
+                    }
+                    Err(e) => {
+                        // Fall back to placeholder on render error
+                        tracing::warn!("Chart render error: {}", e);
+                        self.draw_chart_placeholder(t, chart_type);
+                    }
+                }
+            }
+            Err(e) => {
+                // Fall back to placeholder on parse error
+                tracing::warn!("Chart config error: {}", e);
+                self.draw_chart_placeholder(t, chart_type);
+            }
+        }
+    }
+
+    /// Convert RGB buffer to RGBA buffer.
+    fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+        let pixel_count = rgb.len() / 3;
+        let mut rgba = Vec::with_capacity(pixel_count * 4);
+
+        for i in 0..pixel_count {
+            rgba.push(rgb[i * 3]);     // R
+            rgba.push(rgb[i * 3 + 1]); // G
+            rgba.push(rgb[i * 3 + 2]); // B
+            rgba.push(255);            // A (fully opaque)
+        }
+
+        rgba
+    }
+
+    /// Draw an RGBA buffer to the canvas at the specified position.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn draw_rgba_buffer(&self, data: &[u8], x: f32, y: f32, width: u32, height: u32) {
+        // Create a clamped array from the RGBA data
+        let clamped = wasm_bindgen::Clamped(data);
+
+        // Create ImageData
+        match ImageData::new_with_u8_clamped_array_and_sh(clamped, width, height) {
+            Ok(image_data) => {
+                // Draw to canvas
+                if let Err(e) = self.ctx.put_image_data(&image_data, f64::from(x), f64::from(y)) {
+                    tracing::warn!("Failed to draw image data: {:?}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create ImageData: {:?}", e);
+            }
+        }
+    }
+
+    /// Draw a placeholder for charts that fail to render.
+    fn draw_chart_placeholder(&self, t: &Transform, chart_type: &str) {
+        // Draw light blue background
+        self.ctx.set_fill_style_str("#e3f2fd");
+        self.ctx.fill_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        // Draw border
+        self.ctx.set_stroke_style_str("#90caf9");
+        self.ctx.set_line_width(1.0);
+        self.ctx.stroke_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        // Draw label
+        self.ctx.set_fill_style_str("#1976d2");
+        self.ctx.set_font("14px sans-serif");
+        let _ = self.ctx.fill_text(
+            &format!("Chart: {chart_type}"),
+            f64::from(t.x) + 10.0,
+            f64::from(t.y) + 25.0,
+        );
+
+        // Draw icon placeholder
+        self.ctx.set_fill_style_str("#bbdefb");
+        let icon_x = f64::from(t.x) + f64::from(t.width) / 2.0 - 20.0;
+        let icon_y = f64::from(t.y) + f64::from(t.height) / 2.0 - 10.0;
+        self.ctx.fill_rect(icon_x, icon_y, 40.0, 20.0);
     }
 
     /// Get the display color for an element.
@@ -331,13 +480,54 @@ impl CanvasApp {
     }
 }
 
-/// Create a chart element JSON.
+/// Create a chart element JSON with sample data.
 #[wasm_bindgen(js_name = createChartElement)]
 #[must_use]
 pub fn create_chart_element(chart_type: &str, x: f32, y: f32, width: f32, height: f32) -> String {
+    // Provide sample data based on chart type
+    let data = match chart_type {
+        "pie" | "donut" => serde_json::json!({
+            "series": [
+                {"label": "Category A", "value": 35},
+                {"label": "Category B", "value": 25},
+                {"label": "Category C", "value": 20},
+                {"label": "Category D", "value": 15},
+                {"label": "Other", "value": 5}
+            ]
+        }),
+        "scatter" => serde_json::json!({
+            "series": [{
+                "name": "Sample Data",
+                "points": [
+                    {"x": 10, "y": 20},
+                    {"x": 25, "y": 40},
+                    {"x": 40, "y": 35},
+                    {"x": 55, "y": 60},
+                    {"x": 70, "y": 50},
+                    {"x": 85, "y": 75}
+                ]
+            }]
+        }),
+        _ => serde_json::json!({
+            "series": [{
+                "name": "Series 1",
+                "points": [
+                    {"x": "Jan", "y": 30},
+                    {"x": "Feb", "y": 45},
+                    {"x": "Mar", "y": 28},
+                    {"x": "Apr", "y": 60},
+                    {"x": "May", "y": 55},
+                    {"x": "Jun", "y": 70}
+                ]
+            }],
+            "x_label": "Month",
+            "y_label": "Value"
+        }),
+    };
+
     let element = Element::new(ElementKind::Chart {
         chart_type: chart_type.to_string(),
-        data: serde_json::json!({}),
+        data,
     })
     .with_transform(Transform {
         x,
@@ -349,6 +539,39 @@ pub fn create_chart_element(chart_type: &str, x: f32, y: f32, width: f32, height
     });
 
     serde_json::to_string(&element).unwrap_or_default()
+}
+
+/// Create a chart element JSON with custom data.
+///
+/// # Errors
+///
+/// Returns an error if the data JSON is invalid.
+#[wasm_bindgen(js_name = createChartWithData)]
+pub fn create_chart_with_data(
+    chart_type: &str,
+    data_json: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Result<String, JsValue> {
+    let data: serde_json::Value =
+        serde_json::from_str(data_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let element = Element::new(ElementKind::Chart {
+        chart_type: chart_type.to_string(),
+        data,
+    })
+    .with_transform(Transform {
+        x,
+        y,
+        width,
+        height,
+        rotation: 0.0,
+        z_index: 0,
+    });
+
+    serde_json::to_string(&element).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Create a text element JSON.

@@ -256,9 +256,29 @@
                 <path d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2S9 3.34 9 5V11C9 12.66 10.34 14 12 14ZM17.91 11C17.91 14 15.28 16.18 12 16.18S6.09 14 6.09 11H4C4 14.72 7.28 17.77 11 18.11V21H13V18.11C16.72 17.77 20 14.72 20 11H17.91Z"/>
             </svg>
         </button>
-        <button class="tool-btn" data-tool="add-chart" title="Add Chart">
+        <button class="tool-btn" data-tool="add-bar" title="Add Bar Chart">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M3 13h2v8H3v-8zm4-6h2v14H7V7zm4 3h2v11h-2V10zm4-6h2v17h-2V4zm4 9h2v8h-2v-8z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="add-line" title="Add Line Chart">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M3.5 18.5l6-6 4 4L22 6.9l-1.4-1.4-6.1 6.1-4-4L2 16.1l1.5 2.4z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="add-pie" title="Add Pie Chart">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M11 2v9h9c0-5-4-9-9-9zm-2 11H2c0 5 4 9 9 9s9-4 9-9h-9V4c-5 0-9 4-9 9z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="add-area" title="Add Area Chart">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M3 18l4-4 4 4 10-10v12H3v-2z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="add-scatter" title="Add Scatter Chart">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="7" cy="17" r="2"/><circle cx="11" cy="11" r="2"/><circle cx="17" cy="7" r="2"/><circle cx="14" cy="14" r="2"/>
             </svg>
         </button>
         <button class="tool-btn" data-tool="add-text" title="Add Text">
@@ -574,21 +594,48 @@
                 elementInfo.classList.remove('visible');
             }
 
+            // Track chart placement offset for staggered positioning
+            let chartOffset = 0;
+
             // Tool actions
             function handleToolAction(tool) {
                 if (!canvasApp) return;
 
                 const canvas = document.getElementById('main-canvas');
-                const centerX = canvas.width / 2;
-                const centerY = canvas.height / 2;
+                // Stagger chart positions so they don't overlap
+                const offsetX = (chartOffset % 3) * 220;
+                const offsetY = Math.floor(chartOffset / 3) * 170;
+                const baseX = 50 + offsetX;
+                const baseY = 50 + offsetY;
 
                 switch (tool) {
-                    case 'add-chart':
-                        const chartJson = createChartElement('bar', centerX - 100, centerY - 75, 200, 150);
-                        canvasApp.addElement(chartJson);
+                    case 'add-bar':
+                        const barJson = createChartElement('bar', baseX, baseY, 300, 200);
+                        canvasApp.addElement(barJson);
+                        chartOffset++;
+                        break;
+                    case 'add-line':
+                        const lineJson = createChartElement('line', baseX, baseY, 300, 200);
+                        canvasApp.addElement(lineJson);
+                        chartOffset++;
+                        break;
+                    case 'add-pie':
+                        const pieJson = createChartElement('pie', baseX, baseY, 250, 250);
+                        canvasApp.addElement(pieJson);
+                        chartOffset++;
+                        break;
+                    case 'add-area':
+                        const areaJson = createChartElement('area', baseX, baseY, 300, 200);
+                        canvasApp.addElement(areaJson);
+                        chartOffset++;
+                        break;
+                    case 'add-scatter':
+                        const scatterJson = createChartElement('scatter', baseX, baseY, 300, 200);
+                        canvasApp.addElement(scatterJson);
+                        chartOffset++;
                         break;
                     case 'add-text':
-                        const textJson = createTextElement('Hello from AI', centerX - 50, centerY, 24, '#333333');
+                        const textJson = createTextElement('Hello from AI', baseX, baseY + 220, 24, '#333333');
                         canvasApp.addElement(textJson);
                         break;
                 }

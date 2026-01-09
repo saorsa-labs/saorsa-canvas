@@ -30,12 +30,14 @@ tracing.workspace = true
 
 # WASM
 wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
 web-sys = { workspace = true, features = [
     "Window",
     "Document",
     "Element",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
+    "ImageData",
     "TouchEvent",
     "TouchList",
     "Touch",
