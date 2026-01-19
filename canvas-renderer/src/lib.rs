@@ -88,12 +88,17 @@ impl Renderer {
     /// Returns an error if no suitable backend is available.
     pub fn new(config: RendererConfig) -> RenderResult<Self> {
         let backend = Self::create_backend(&config)?;
+        Ok(Self::with_backend(backend, config))
+    }
 
-        Ok(Self {
+    /// Create a renderer from an explicit backend implementation.
+    #[must_use]
+    pub fn with_backend(backend: Box<dyn RenderBackend>, config: RendererConfig) -> Self {
+        Self {
             config,
             backend,
             frame_count: 0,
-        })
+        }
     }
 
     /// Create the appropriate backend based on config and availability.

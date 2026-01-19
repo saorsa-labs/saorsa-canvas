@@ -8,6 +8,18 @@ use canvas_core::Element;
 
 use crate::error::{RenderError, RenderResult};
 
+/// Helper trait to convert plotters errors to `RenderError::Frame`.
+trait ChartErrorExt<T> {
+    /// Convert a drawing error to a frame render error with context.
+    fn frame_err(self, context: &str) -> RenderResult<T>;
+}
+
+impl<T, E: std::fmt::Display> ChartErrorExt<T> for Result<T, E> {
+    fn frame_err(self, context: &str) -> RenderResult<T> {
+        self.map_err(|e| RenderError::Frame(format!("{context}: {e}")))
+    }
+}
+
 /// Chart types supported by the canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartType {
@@ -156,25 +168,16 @@ pub fn render_chart_to_buffer(config: &ChartConfig) -> RenderResult<Vec<u8>> {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
         let bg_color = parse_hex_color(&config.background);
         root.fill(&bg_color)
-            .map_err(|e| RenderError::Frame(format!("Failed to fill background: {e}")))?;
+            .frame_err("Failed to fill background")?;
 
         match config.chart_type {
-            ChartType::Bar | ChartType::BarHorizontal => {
-                render_bar_chart(&root, config)?;
-            }
-            ChartType::Line | ChartType::Area => {
-                render_line_chart(&root, config)?;
-            }
-            ChartType::Scatter => {
-                render_scatter_chart(&root, config)?;
-            }
-            ChartType::Pie | ChartType::Donut => {
-                render_pie_chart(&root, config)?;
-            }
+            ChartType::Bar | ChartType::BarHorizontal => render_bar_chart(&root, config)?,
+            ChartType::Line | ChartType::Area => render_line_chart(&root, config)?,
+            ChartType::Scatter => render_scatter_chart(&root, config)?,
+            ChartType::Pie | ChartType::Donut => render_pie_chart(&root, config)?,
         }
 
-        root.present()
-            .map_err(|e| RenderError::Frame(format!("Failed to present chart: {e}")))?;
+        root.present().frame_err("Failed to present chart")?;
     }
 
     // Convert RGB to RGBA
@@ -229,7 +232,7 @@ fn render_bar_chart(
         .x_label_area_size(40)
         .y_label_area_size(50)
         .build_cartesian_2d(0..num_bars, y_min..y_max)
-        .map_err(|e| RenderError::Frame(format!("Failed to build chart: {e}")))?;
+        .frame_err("Failed to build chart")?;
 
     chart
         .configure_mesh()
@@ -243,7 +246,7 @@ fn render_bar_chart(
         })
         .y_desc(config.y_label.as_deref().unwrap_or(""))
         .draw()
-        .map_err(|e| RenderError::Frame(format!("Failed to draw mesh: {e}")))?;
+        .frame_err("Failed to draw mesh")?;
 
     let num_series = config.series.len();
     let bar_width = 0.8 / num_series as f64;
@@ -261,7 +264,7 @@ fn render_bar_chart(
                     color.filled(),
                 )
             }))
-            .map_err(|e| RenderError::Frame(format!("Failed to draw bars: {e}")))?
+            .frame_err("Failed to draw bars")?
             .label(&series.name)
             .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 10, y + 5)], color.filled()));
     }
@@ -272,7 +275,7 @@ fn render_bar_chart(
             .background_style(WHITE.mix(0.8))
             .border_style(BLACK)
             .draw()
-            .map_err(|e| RenderError::Frame(format!("Failed to draw legend: {e}")))?;
+            .frame_err("Failed to draw legend")?;
     }
 
     Ok(())
@@ -322,14 +325,14 @@ fn render_line_chart(
         .x_label_area_size(40)
         .y_label_area_size(50)
         .build_cartesian_2d(x_min..x_max, y_min..y_max)
-        .map_err(|e| RenderError::Frame(format!("Failed to build chart: {e}")))?;
+        .frame_err("Failed to build chart")?;
 
     chart
         .configure_mesh()
         .x_desc(config.x_label.as_deref().unwrap_or(""))
         .y_desc(config.y_label.as_deref().unwrap_or(""))
         .draw()
-        .map_err(|e| RenderError::Frame(format!("Failed to draw mesh: {e}")))?;
+        .frame_err("Failed to draw mesh")?;
 
     let is_area = config.chart_type == ChartType::Area;
 
@@ -341,12 +344,12 @@ fn render_line_chart(
         if is_area {
             chart
                 .draw_series(AreaSeries::new(points.clone(), 0.0, color.mix(0.3)))
-                .map_err(|e| RenderError::Frame(format!("Failed to draw area: {e}")))?;
+                .frame_err("Failed to draw area")?;
         }
 
         chart
             .draw_series(LineSeries::new(points, color.stroke_width(2)))
-            .map_err(|e| RenderError::Frame(format!("Failed to draw line: {e}")))?
+            .frame_err("Failed to draw line")?
             .label(&series.name)
             .legend(move |(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], color.stroke_width(2))
@@ -359,7 +362,7 @@ fn render_line_chart(
             .background_style(WHITE.mix(0.8))
             .border_style(BLACK)
             .draw()
-            .map_err(|e| RenderError::Frame(format!("Failed to draw legend: {e}")))?;
+            .frame_err("Failed to draw legend")?;
     }
 
     Ok(())
@@ -407,14 +410,14 @@ fn render_scatter_chart(
         .x_label_area_size(40)
         .y_label_area_size(50)
         .build_cartesian_2d(x_min..x_max, y_min..y_max)
-        .map_err(|e| RenderError::Frame(format!("Failed to build chart: {e}")))?;
+        .frame_err("Failed to build chart")?;
 
     chart
         .configure_mesh()
         .x_desc(config.x_label.as_deref().unwrap_or(""))
         .y_desc(config.y_label.as_deref().unwrap_or(""))
         .draw()
-        .map_err(|e| RenderError::Frame(format!("Failed to draw mesh: {e}")))?;
+        .frame_err("Failed to draw mesh")?;
 
     for (series_idx, series) in config.series.iter().enumerate() {
         let color = get_series_color(series_idx, series.color.as_deref());
@@ -426,7 +429,7 @@ fn render_scatter_chart(
                     .iter()
                     .map(|p| Circle::new((p.x, p.y), 5, color.filled())),
             )
-            .map_err(|e| RenderError::Frame(format!("Failed to draw scatter: {e}")))?
+            .frame_err("Failed to draw scatter")?
             .label(&series.name)
             .legend(move |(x, y)| Circle::new((x + 5, y), 5, color.filled()));
     }
@@ -437,7 +440,7 @@ fn render_scatter_chart(
             .background_style(WHITE.mix(0.8))
             .border_style(BLACK)
             .draw()
-            .map_err(|e| RenderError::Frame(format!("Failed to draw legend: {e}")))?;
+            .frame_err("Failed to draw legend")?;
     }
 
     Ok(())
@@ -477,7 +480,7 @@ fn render_pie_chart(
             (config.width as i32 / 2, 15),
             ("sans-serif", 20).into_font().color(&BLACK),
         ))
-        .map_err(|e| RenderError::Frame(format!("Failed to draw title: {e}")))?;
+        .frame_err("Failed to draw title")?;
     }
 
     let center_x = f64::from(config.width) / 2.0;
@@ -522,7 +525,7 @@ fn render_pie_chart(
         }
 
         root.draw(&Polygon::new(vertices, color.filled()))
-            .map_err(|e| RenderError::Frame(format!("Failed to draw pie slice: {e}")))?;
+            .frame_err("Failed to draw pie slice")?;
 
         start_angle = end_angle;
     }
@@ -541,14 +544,14 @@ fn render_pie_chart(
                 [(legend_x, legend_y), (legend_x + 12, legend_y + 12)],
                 color.filled(),
             ))
-            .map_err(|e| RenderError::Frame(format!("Failed to draw legend box: {e}")))?;
+            .frame_err("Failed to draw legend box")?;
 
             root.draw(&Text::new(
                 label.to_string(),
                 (legend_x + 18, legend_y + 10),
                 ("sans-serif", 12).into_font().color(&BLACK),
             ))
-            .map_err(|e| RenderError::Frame(format!("Failed to draw legend text: {e}")))?;
+            .frame_err("Failed to draw legend text")?;
 
             legend_y += 18;
         }

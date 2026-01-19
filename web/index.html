@@ -208,6 +208,29 @@
         #element-info.visible {
             display: block;
         }
+
+        #error-toast {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: rgba(244, 67, 54, 0.95);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 200;
+            opacity: 0;
+            transition: opacity 0.3s, transform 0.3s;
+            pointer-events: none;
+            max-width: 80%;
+            text-align: center;
+        }
+
+        #error-toast.visible {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
     </style>
 </head>
 <body>
@@ -239,6 +262,8 @@
     <div id="touch-indicator"></div>
 
     <div id="element-info"></div>
+
+    <div id="error-toast"></div>
 
     <div id="toolbar">
         <button class="tool-btn active" data-tool="select" title="Select">
@@ -317,6 +342,17 @@
             createVideoElement
         } from './pkg/canvas_app.js';
         import { videoManager } from './video.js';
+        import { SignalingManager } from './signaling.js';
+        import { CanvasRenderer } from './canvas-renderer.js';
+
+        // Initialize SignalingManager with VideoManager
+        let signalingManager = null;
+
+        // Canvas2D fallback renderer for video
+        let canvasRenderer = null;
+
+        // Current scene data for fallback renderer
+        let currentSceneData = null;
 
         (async function() {
             'use strict';
@@ -343,6 +379,99 @@
             let holographicMode = false;
             let voiceManager = null;
             let voiceMode = false;
+            let currentSession = 'default';
+
+            // Track video element IDs for cleanup (streamId -> elementId)
+            const videoElementIds = new Map();
+            let peerVideoCount = 0;
+
+            // Calculate grid position for peer video elements
+            function calculatePeerPosition(peerIndex) {
+                const cols = 3;
+                const col = peerIndex % cols;
+                const row = Math.floor(peerIndex / cols);
+                return {
+                    x: 50 + col * 350,
+                    y: 300 + row * 270
+                };
+            }
+
+            // Get count of video elements from peer streams
+            function getVideoPeerCount() {
+                return videoElementIds.size;
+            }
+
+            // Create a video element for a peer stream
+            function createPeerVideoElement(streamId, peerId) {
+                const pos = calculatePeerPosition(peerVideoCount);
+                peerVideoCount++;
+
+                return {
+                    id: '',
+                    kind: {
+                        type: 'Video',
+                        stream_id: streamId,
+                        mirror: false,
+                        crop: null
+                    },
+                    transform: {
+                        x: pos.x,
+                        y: pos.y,
+                        width: 320,
+                        height: 240,
+                        rotation: 0,
+                        z_index: 10
+                    }
+                };
+            }
+
+            // Find video element ID by stream ID
+            function findVideoElementByStreamId(streamId) {
+                return videoElementIds.get(streamId) || null;
+            }
+
+            // Handle video stream changes from VideoManager
+            function setupVideoStreamListener() {
+                videoManager.onStreamChange((action, streamId) => {
+                    if (action === 'added' && streamId.startsWith('peer-')) {
+                        // Auto-create video element for peer stream
+                        const peerId = streamId.replace('peer-', '');
+                        const element = createPeerVideoElement(streamId, peerId);
+
+                        console.log(`[Canvas] Creating video element for peer stream: ${streamId}`);
+
+                        sendMutation('add_element', { element },
+                            (result) => {
+                                const elementId = result.id;
+                                videoElementIds.set(streamId, elementId);
+                                activeVideoStreams.add(streamId);
+                                console.log(`[Canvas] Video element created: ${elementId} for ${streamId}`);
+                            },
+                            (error) => {
+                                console.error(`[Canvas] Failed to create video element for ${streamId}:`, error.message);
+                            }
+                        );
+                    } else if (action === 'removed' && streamId.startsWith('peer-')) {
+                        // Remove video element when peer stream ends
+                        const elementId = videoElementIds.get(streamId);
+                        if (elementId) {
+                            console.log(`[Canvas] Removing video element for peer stream: ${streamId}`);
+
+                            sendMutation('remove_element', { id: elementId },
+                                (result) => {
+                                    videoElementIds.delete(streamId);
+                                    activeVideoStreams.delete(streamId);
+                                    peerVideoCount = Math.max(0, peerVideoCount - 1);
+                                    console.log(`[Canvas] Video element removed: ${elementId}`);
+                                },
+                                (error) => {
+                                    console.error(`[Canvas] Failed to remove video element:`, error.message);
+                                }
+                            );
+                        }
+                    }
+                });
+            }
 
             // Initialize WASM module
             async function initWasm() {
@@ -356,6 +485,10 @@
                     // Set initial size
                     resizeCanvas();
 
+                    // Also initialize CanvasRenderer for video overlay
+                    const canvas = document.getElementById('main-canvas');
+                    canvasRenderer = new CanvasRenderer(canvas, videoManager);
+
                     loadingText.textContent = 'Ready!';
                     setTimeout(() => {
                         loadingOverlay.classList.add('hidden');
@@ -364,7 +497,13 @@
                     return true;
                 } catch (e) {
                     console.error('Failed to initialize WASM:', e);
-                    loadingText.textContent = 'WASM not available - using fallback';
+                    loadingText.textContent = 'WASM not available - using Canvas2D fallback';
+
+                    // Initialize Canvas2D fallback renderer
+                    const canvas = document.getElementById('main-canvas');
+                    canvasRenderer = new CanvasRenderer(canvas, videoManager);
+                    resizeCanvas();
+
                     setTimeout(() => {
                         loadingOverlay.classList.add('hidden');
                     }, 1000);
@@ -385,6 +524,25 @@
                 if (canvasApp) {
                     canvasApp.resize(width, height);
                 }
+
+                if (canvasRenderer) {
+                    canvasRenderer.resize(width, height);
+                }
+            }
+
+            function subscribeToSession(sessionId) {
+                currentSession = sessionId;
+                sendEvent({
+                    type: 'subscribe',
+                    session_id: sessionId
+                });
+            }
+
+            function requestSceneSnapshot() {
+                sendEvent({
+                    type: 'get_scene',
+                    session_id: currentSession
+                });
             }
 
             // Update video frames from VideoManager to WASM
@@ -440,10 +598,42 @@
 
                 ws.onopen = () => {
                     setConnectionStatus('connected');
+                    subscribeToSession(currentSession);
+                    requestSceneSnapshot();
+
+                    // Initialize SignalingManager for WebRTC calls
+                    if (!signalingManager) {
+                        signalingManager = new SignalingManager(videoManager);
+                        window.signalingManager = signalingManager; // Expose for console debugging
+                        console.log('[Canvas] SignalingManager initialized, peer ID:', signalingManager.getPeerId());
+                    }
+
+                    // Setup auto video element creation for peer streams
+                    setupVideoStreamListener();
+
+                    // Start media stats collection for debug overlay
+                    if (signalingManager && canvasRenderer) {
+                        window._statsIntervalId = signalingManager.startStatsCollection((stats) => {
+                            canvasRenderer.setMediaStats(stats);
+                        }, 1000);
+                    }
                 };
 
                 ws.onclose = () => {
                     setConnectionStatus('offline');
+
+                    // Stop stats collection
+                    if (window._statsIntervalId) {
+                        clearInterval(window._statsIntervalId);
+                        window._statsIntervalId = null;
+                    }
+
+                    // Cleanup SignalingManager on disconnect
+                    if (signalingManager) {
+                        signalingManager.cleanup();
+                        signalingManager = null;
+                        window.signalingManager = null;
+                    }
                     setTimeout(connect, 3000);
                 };
 
@@ -474,29 +664,181 @@
                 switch (msg.type) {
                     case 'welcome':
                         console.log('Connected to Saorsa Canvas v' + msg.version);
+                        if (msg.session_id) {
+                            currentSession = msg.session_id;
+                        }
+                        requestSceneSnapshot();
                         break;
-                    case 'render':
-                        // Update scene from server
+                    case 'scene_update':
+                        // Store scene for fallback renderer
+                        currentSceneData = msg.scene;
+
                         if (canvasApp && msg.scene) {
-                            canvasApp.setSceneJson(JSON.stringify(msg.scene));
+                            try {
+                                canvasApp.applySceneDocument(JSON.stringify(msg.scene));
+                            } catch (err) {
+                                console.error('Failed to apply scene document', err);
+                            }
+                        }
+
+                        // Update Canvas2D renderer scene
+                        if (canvasRenderer && msg.scene) {
+                            canvasRenderer.setScene(msg.scene);
                         }
                         break;
-                    case 'add_element':
-                        // Add element from AI
-                        if (canvasApp && msg.element) {
-                            canvasApp.addElement(JSON.stringify(msg.element));
-                        }
+                    case 'element_added':
+                    case 'element_updated':
+                    case 'element_removed':
+                    case 'sync_result':
+                        requestSceneSnapshot();
                         break;
                     case 'ack':
-                        console.log('Server acknowledged:', msg.received);
+                        if (msg.message_id && pendingAcks.has(msg.message_id)) {
+                            const pending = pendingAcks.get(msg.message_id);
+                            pendingAcks.delete(msg.message_id);
+                            if (msg.success && pending.onAck) {
+                                pending.onAck(msg.result || {});
+                            } else if (!msg.success && pending.onError) {
+                                pending.onError({ code: 'server_error', message: 'Operation failed' });
+                            }
+                        }
+                        console.log('Server acknowledged:', msg.message_id || 'unknown', msg.success ? 'success' : 'failed');
                         break;
+                    case 'error':
+                        if (msg.message_id && pendingAcks.has(msg.message_id)) {
+                            const pending = pendingAcks.get(msg.message_id);
+                            pendingAcks.delete(msg.message_id);
+                            if (pending.onError) {
+                                pending.onError({ code: msg.code, message: msg.message });
+                            }
+                        }
+                        console.error('Server error:', msg.code, msg.message);
+                        showErrorToast(msg.message || 'Server error');
+                        break;
+
+                    // WebRTC signaling messages - forwarded to SignalingManager
+                    case 'peer_assigned':
+                        console.log('Assigned peer ID:', msg.peer_id);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handlePeerAssigned(msg.peer_id);
+                        }
+                        break;
+                    case 'incoming_call':
+                        console.log('Incoming call from:', msg.from_peer_id);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handleIncomingCall(msg.from_peer_id, msg.session_id);
+                        }
+                        break;
+                    case 'relay_offer':
+                        console.debug('Received SDP offer from:', msg.from_peer_id);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handleOffer(msg.from_peer_id, msg.sdp);
+                        }
+                        break;
+                    case 'relay_answer':
+                        console.debug('Received SDP answer from:', msg.from_peer_id);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handleAnswer(msg.from_peer_id, msg.sdp);
+                        }
+                        break;
+                    case 'relay_ice_candidate':
+                        console.debug('Received ICE candidate from:', msg.from_peer_id);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handleIceCandidate(msg.from_peer_id, {
+                                candidate: msg.candidate,
+                                sdpMid: msg.sdp_mid,
+                                sdpMLineIndex: msg.sdp_m_line_index
+                            });
+                        }
+                        break;
+                    case 'call_ended':
+                        console.log('Call ended by:', msg.from_peer_id, 'reason:', msg.reason);
+                        if (typeof signalingManager !== 'undefined' && signalingManager) {
+                            signalingManager.handleCallEnded(msg.from_peer_id, msg.reason);
+                        }
+                        break;
+
+                    default:
+                        console.debug('Unhandled message:', msg);
                 }
             }
 
             function sendEvent(event) {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(event));
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    return false;
                 }
+                ws.send(JSON.stringify(event));
+                return true;
+            }
+
+            // Mutation helper with acknowledgment handling
+            const pendingAcks = new Map();
+            let messageCounter = 0;
+
+            function sendMutation(type, payload, onAck, onError) {
+                const messageId = `msg-${Date.now()}-${++messageCounter}`;
+                const message = { type, ...payload, message_id: messageId };
+
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    if (onError) {
+                        onError({ code: 'not_connected', message: 'WebSocket not connected' });
+                    }
+                    showErrorToast('Not connected to server');
+                    return null;
+                }
+
+                pendingAcks.set(messageId, { onAck, onError, timestamp: Date.now() });
+                ws.send(JSON.stringify(message));
+
+                // Timeout after 5 seconds
+                setTimeout(() => {
+                    if (pendingAcks.has(messageId)) {
+                        const pending = pendingAcks.get(messageId);
+                        pendingAcks.delete(messageId);
+                        if (pending.onError) {
+                            pending.onError({ code: 'timeout', message: 'Request timed out' });
+                        }
+                        showErrorToast('Server request timed out');
+                    }
+                }, 5000);
+
+                return messageId;
+            }
+
+            // WebRTC signaling message helpers
+            function sendSignaling(type, payload) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    console.error('Cannot send signaling message: WebSocket not connected');
+                    return false;
+                }
+                const message = { type, ...payload };
+                ws.send(JSON.stringify(message));
+                return true;
+            }
+
+            // Expose signaling helpers for SignalingManager
+            window.sendSignaling = sendSignaling;
+
+            // Error toast for user feedback
+            let errorToastTimeout = null;
+            const errorToast = document.getElementById('error-toast');
+
+            function showErrorToast(message) {
+                if (!errorToast) return;
+
+                // Clear any existing timeout
+                if (errorToastTimeout) {
+                    clearTimeout(errorToastTimeout);
+                }
+
+                errorToast.textContent = message;
+                errorToast.classList.add('visible');
+
+                // Auto-dismiss after 3 seconds
+                errorToastTimeout = setTimeout(() => {
+                    errorToast.classList.remove('visible');
+                    errorToastTimeout = null;
+                }, 3000);
             }
 
             // Touch handling
@@ -517,14 +859,6 @@
                         hideElementInfo();
                     }
                 }
-
-                sendEvent({
-                    type: 'touch',
-                    phase: 'start',
-                    x: x,
-                    y: y,
-                    tool: currentTool
-                });
 
                 // Register touch for voice fusion
                 if (voiceManager && voiceMode) {
@@ -550,13 +884,6 @@
                     canvasApp.handleTouch(x, y, 'move');
                 }
 
-                sendEvent({
-                    type: 'touch',
-                    phase: 'move',
-                    x: x,
-                    y: y,
-                    tool: currentTool
-                });
             }
 
             function handleTouchEnd(e) {
@@ -567,11 +894,6 @@
                     canvasApp.handleTouch(0, 0, 'end');
                 }
 
-                sendEvent({
-                    type: 'touch',
-                    phase: 'end',
-                    tool: currentTool
-                });
             }
 
             // Mouse handling (fallback)
@@ -590,14 +912,6 @@
                         hideElementInfo();
                     }
                 }
-
-                sendEvent({
-                    type: 'touch',
-                    phase: 'start',
-                    x: x,
-                    y: y,
-                    tool: currentTool
-                });
 
                 // Register click for voice fusion
                 if (voiceManager && voiceMode) {
@@ -623,13 +937,6 @@
                     canvasApp.handleTouch(x, y, 'move');
                 }
 
-                sendEvent({
-                    type: 'touch',
-                    phase: 'move',
-                    x: x,
-                    y: y,
-                    tool: currentTool
-                });
             }
 
             function handleMouseUp() {
@@ -639,11 +946,6 @@
                     canvasApp.handleTouch(0, 0, 'end');
                 }
 
-                sendEvent({
-                    type: 'touch',
-                    phase: 'end',
-                    tool: currentTool
-                });
             }
 
             function showTouchIndicator(x, y) {
@@ -668,7 +970,7 @@
             // Track chart placement offset for staggered positioning
             let chartOffset = 0;
 
-            // Tool actions
+            // Tool actions - sends mutations via WebSocket for persistence
             function handleToolAction(tool) {
                 if (!canvasApp) return;
 
@@ -679,35 +981,50 @@
                 const baseX = 50 + offsetX;
                 const baseY = 50 + offsetY;
 
+                // Helper to send element mutation
+                function addElementViaMutation(elementJson) {
+                    const element = JSON.parse(elementJson);
+                    sendMutation('add_element', { element },
+                        (result) => {
+                            console.log('[Saorsa] Element added via WebSocket:', result.id || 'success');
+                        },
+                        (error) => {
+                            console.error('[Saorsa] Failed to add element:', error.message);
+                            // Fallback: add locally if server fails
+                            canvasApp.addElement(elementJson);
+                        }
+                    );
+                }
+
                 switch (tool) {
                     case 'add-bar':
                         const barJson = createChartElement('bar', baseX, baseY, 300, 200);
-                        canvasApp.addElement(barJson);
+                        addElementViaMutation(barJson);
                         chartOffset++;
                         break;
                     case 'add-line':
                         const lineJson = createChartElement('line', baseX, baseY, 300, 200);
-                        canvasApp.addElement(lineJson);
+                        addElementViaMutation(lineJson);
                         chartOffset++;
                         break;
                     case 'add-pie':
                         const pieJson = createChartElement('pie', baseX, baseY, 250, 250);
-                        canvasApp.addElement(pieJson);
+                        addElementViaMutation(pieJson);
                         chartOffset++;
                         break;
                     case 'add-area':
                         const areaJson = createChartElement('area', baseX, baseY, 300, 200);
-                        canvasApp.addElement(areaJson);
+                        addElementViaMutation(areaJson);
                         chartOffset++;
                         break;
                     case 'add-scatter':
                         const scatterJson = createChartElement('scatter', baseX, baseY, 300, 200);
-                        canvasApp.addElement(scatterJson);
+                        addElementViaMutation(scatterJson);
                         chartOffset++;
                         break;
                     case 'add-text':
                         const textJson = createTextElement('Hello from AI', baseX, baseY + 220, 24, '#333333');
-                        canvasApp.addElement(textJson);
+                        addElementViaMutation(textJson);
                         break;
                     case 'add-video':
                         addVideoElement();
@@ -715,10 +1032,39 @@
                 }
             }
 
-            // Add a video element from local camera
+            // Toggle local camera video element
             async function addVideoElement() {
-                if (!canvasApp) return;
+                const localStreamId = 'local';
+                const videoBtn = document.querySelector('[data-tool="add-video"]');
 
+                // Check if local camera is already active - toggle off
+                if (activeVideoStreams.has(localStreamId)) {
+                    const elementId = videoElementIds.get(localStreamId);
+
+                    // Remove stream
+                    videoManager.removeStream(localStreamId);
+                    activeVideoStreams.delete(localStreamId);
+
+                    // Remove element from canvas
+                    if (elementId) {
+                        sendMutation('remove_element', { id: elementId },
+                            () => {
+                                videoElementIds.delete(localStreamId);
+                                console.log('[Canvas] Local camera removed');
+                            },
+                            (error) => console.error('[Canvas] Failed to remove local camera element:', error)
+                        );
+                    }
+
+                    // Update button state
+                    if (videoBtn) {
+                        videoBtn.classList.remove('active');
+                        videoBtn.style.backgroundColor = '';
+                    }
+                    return;
+                }
+
+                // Add local camera
                 try {
                     // Request camera access
                     const streamId = await videoManager.addLocalCamera({ mirror: true });
@@ -728,7 +1074,6 @@
                     const info = videoManager.getStreamInfo(streamId);
 
                     // Create video element in canvas
-                    const canvas = document.getElementById('main-canvas');
                     const videoJson = createVideoElement(
                         streamId,
                         true, // is_live
@@ -738,12 +1083,32 @@
                         info.width > 640 ? 640 : info.width, // cap width
                         info.height > 480 ? 480 : info.height // cap height
                     );
-                    canvasApp.addElement(videoJson);
 
-                    console.log('[Saorsa] Local camera added:', streamId);
+                    // Send via WebSocket for persistence
+                    const element = JSON.parse(videoJson);
+                    sendMutation('add_element', { element },
+                        (result) => {
+                            videoElementIds.set(streamId, result.id);
+                            console.log('[Canvas] Local camera added via WebSocket:', streamId);
+
+                            // Update button state
+                            if (videoBtn) {
+                                videoBtn.classList.add('active');
+                                videoBtn.style.backgroundColor = '#4CAF50';
+                            }
+                        },
+                        (error) => {
+                            console.error('[Canvas] Failed to sync video element:', error.message);
+                            // Fallback to local-only if WASM is available
+                            if (canvasApp) {
+                                canvasApp.addElement(videoJson);
+                                console.log('[Canvas] Local camera added locally:', streamId);
+                            }
+                        }
+                    );
                 } catch (error) {
-                    console.error('[Saorsa] Failed to add video:', error);
-                    alert('Failed to access camera: ' + error.message);
+                    console.error('[Canvas] Failed to add video:', error);
+                    showErrorToast('Failed to access camera: ' + error.message);
                 }
             }
 
@@ -971,21 +1336,46 @@
             // Initialize
             const wasmLoaded = await initWasm();
 
+            const canvas = document.getElementById('main-canvas');
+
+            // Event listeners (always attach)
+            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+            canvas.addEventListener('mousedown', handleMouseDown);
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseup', handleMouseUp);
+
+            window.addEventListener('resize', resizeCanvas);
+
+            // Keyboard shortcuts
+            window.addEventListener('keydown', (e) => {
+                // 'D' toggles debug overlay
+                if (e.key === 'd' || e.key === 'D') {
+                    if (canvasRenderer) {
+                        const debugState = canvasRenderer.toggleDebug();
+                        console.log('[Canvas] Debug mode:', debugState ? 'ON' : 'OFF');
+                    }
+                }
+            });
+
+            // Expose debug toggle globally for console access
+            window.toggleDebug = () => {
+                if (canvasRenderer) {
+                    return canvasRenderer.toggleDebug();
+                }
+                return false;
+            };
+
             if (wasmLoaded) {
-                const canvas = document.getElementById('main-canvas');
-
-                // Event listeners
-                canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-                canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-                canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-                canvas.addEventListener('mousedown', handleMouseDown);
-                canvas.addEventListener('mousemove', handleMouseMove);
-                canvas.addEventListener('mouseup', handleMouseUp);
-
-                window.addEventListener('resize', resizeCanvas);
-
-                // Start animation loop
+                // Start WASM animation loop
                 animate();
+            } else {
+                // Start Canvas2D fallback renderer
+                if (canvasRenderer) {
+                    canvasRenderer.start();
+                    console.log('[Canvas] Started Canvas2D fallback renderer');
+                }
             }
 
             // Connect to server

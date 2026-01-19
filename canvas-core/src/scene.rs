@@ -104,21 +104,14 @@ impl Scene {
     /// Returns the ID of the topmost (highest z-index) interactive element.
     #[must_use]
     pub fn element_at(&self, x: f32, y: f32) -> Option<ElementId> {
-        // Transform screen coordinates to canvas coordinates
         let canvas_x = (x - self.pan_x) / self.zoom;
         let canvas_y = (y - self.pan_y) / self.zoom;
 
-        // Find all elements containing this point
-        let mut hits: Vec<_> = self
-            .elements
+        self.elements
             .values()
             .filter(|e| e.interactive && e.contains_point(canvas_x, canvas_y))
-            .collect();
-
-        // Sort by z-index (highest first)
-        hits.sort_by(|a, b| b.transform.z_index.cmp(&a.transform.z_index));
-
-        hits.first().map(|e| e.id)
+            .max_by_key(|e| e.transform.z_index)
+            .map(|e| e.id)
     }
 
     /// Select an element.

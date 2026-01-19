@@ -3,14 +3,23 @@
 //! This is the primary high-performance backend using the wgpu library.
 //! Supports WebGPU (native and web) with automatic fallbacks.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use canvas_core::{Element, ElementKind, Scene};
 use wgpu::util::DeviceExt;
 
+use crate::chart::{parse_chart_config, render_chart_to_buffer};
+use crate::image::{create_placeholder, load_image_from_data_uri};
 use crate::{BackendType, RenderError, RenderResult};
 
+#[cfg(target_arch = "wasm32")]
+use web_sys::HtmlCanvasElement;
+
 use super::RenderBackend;
+
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::Window;
 
 /// Vertex data for quad rendering.
 #[repr(C)]
@@ -70,23 +79,54 @@ struct QuadUniforms {
     color: [f32; 4],
 }
 
+/// Cached texture with GPU resources.
+struct CachedTexture {
+    /// The underlying GPU texture (kept alive to prevent deallocation).
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    /// Texture view used for binding to shaders.
+    view: wgpu::TextureView,
+}
+
 /// wgpu-based GPU renderer.
 pub struct WgpuBackend {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surface: Option<wgpu::Surface<'static>>,
     surface_config: Option<wgpu::SurfaceConfiguration>,
+    /// Pipeline for solid color quads.
     quad_pipeline: wgpu::RenderPipeline,
+    /// Pipeline for textured quads.
+    textured_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
+    /// Bind group layout for solid color quads.
     uniform_bind_group_layout: wgpu::BindGroupLayout,
+    /// Bind group layout for textured quads.
+    textured_bind_group_layout: wgpu::BindGroupLayout,
+    /// Sampler for texture filtering.
+    sampler: wgpu::Sampler,
+    /// Cached textures by element ID.
+    texture_cache: HashMap<String, CachedTexture>,
     width: u32,
     height: u32,
     background_color: wgpu::Color,
+    /// Display scale factor (1.0 = standard, 2.0 = Retina)
+    scale_factor: f64,
 }
 
 impl WgpuBackend {
+    /// Create a new WebGPU backend from a browser canvas element.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_canvas(canvas: HtmlCanvasElement) -> RenderResult<Self> {
+        let width = canvas.width();
+        let height = canvas.height();
+        let mut backend = Self::new()?;
+        backend.configure_canvas_surface(canvas, width, height)?;
+        Ok(backend)
+    }
+
     /// Create a new wgpu backend without a surface (headless mode).
     ///
     /// Use `with_surface` to add a rendering surface later.
@@ -105,13 +145,22 @@ impl WgpuBackend {
     ///
     /// Returns an error if GPU initialization fails.
     pub async fn new_async() -> RenderResult<Self> {
-        let (device, queue) = Self::init_device_and_queue().await?;
+        let (device, queue) = Self::init_device_and_queue(None).await?;
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let (vertex_buffer, index_buffer, uniform_buffer) = Self::create_buffers(&device);
         let uniform_bind_group_layout = Self::create_bind_group_layout(&device);
         let quad_pipeline = Self::create_quad_pipeline(&device, &uniform_bind_group_layout);
+
+        // Textured pipeline setup
+        let textured_bind_group_layout = Self::create_textured_bind_group_layout(&device);
+        let textured_pipeline = Self::create_textured_pipeline_with_format(
+            &device,
+            &textured_bind_group_layout,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        );
+        let sampler = Self::create_sampler(&device);
 
         tracing::info!("wgpu backend initialized successfully");
 
@@ -121,10 +170,14 @@ impl WgpuBackend {
             surface: None,
             surface_config: None,
             quad_pipeline,
+            textured_pipeline,
             vertex_buffer,
             index_buffer,
             uniform_buffer,
             uniform_bind_group_layout,
+            textured_bind_group_layout,
+            sampler,
+            texture_cache: HashMap::new(),
             width: 800,
             height: 600,
             background_color: wgpu::Color {
@@ -133,11 +186,149 @@ impl WgpuBackend {
                 b: 1.0,
                 a: 1.0,
             },
+            scale_factor: 1.0,
+        })
+    }
+
+    /// Create a wgpu backend from a winit window.
+    ///
+    /// This method properly initializes the wgpu surface, adapter, and device
+    /// together to ensure compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU initialization fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_window(window: Arc<Window>) -> RenderResult<Self> {
+        pollster::block_on(Self::from_window_async(window))
+    }
+
+    /// Create a wgpu backend from a winit window asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU initialization fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn from_window_async(window: Arc<Window>) -> RenderResult<Self> {
+        let size = window.inner_size();
+        let width = size.width;
+        let height = size.height;
+        let scale_factor = window.scale_factor();
+
+        // Create instance
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        // Create surface from window (must use same instance for adapter)
+        let surface = instance
+            .create_surface(window)
+            .map_err(|e| RenderError::Surface(e.to_string()))?;
+
+        // Get adapter compatible with this surface
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or_else(|| RenderError::GpuInit("No suitable GPU adapter found".to_string()))?;
+
+        tracing::info!("Using GPU adapter: {:?}", adapter.get_info());
+
+        // Create device from this adapter
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Saorsa Canvas Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| RenderError::GpuInit(e.to_string()))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        // Configure surface
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        surface.configure(&device, &config);
+
+        // Create buffers and pipeline
+        let (vertex_buffer, index_buffer, uniform_buffer) = Self::create_buffers(&device);
+        let uniform_bind_group_layout = Self::create_bind_group_layout(&device);
+        let quad_pipeline =
+            Self::create_quad_pipeline_with_format(&device, &uniform_bind_group_layout, format);
+
+        // Textured pipeline setup
+        let textured_bind_group_layout = Self::create_textured_bind_group_layout(&device);
+        let textured_pipeline = Self::create_textured_pipeline_with_format(
+            &device,
+            &textured_bind_group_layout,
+            format,
+        );
+        let sampler = Self::create_sampler(&device);
+
+        tracing::info!(
+            "wgpu backend initialized with window: {}x{} (scale: {})",
+            width,
+            height,
+            scale_factor
+        );
+
+        Ok(Self {
+            device,
+            queue,
+            surface: Some(surface),
+            surface_config: Some(config),
+            quad_pipeline,
+            textured_pipeline,
+            vertex_buffer,
+            index_buffer,
+            uniform_buffer,
+            uniform_bind_group_layout,
+            textured_bind_group_layout,
+            sampler,
+            texture_cache: HashMap::new(),
+            width,
+            height,
+            background_color: wgpu::Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            scale_factor,
         })
     }
 
     /// Initialize the GPU device and queue.
-    async fn init_device_and_queue() -> RenderResult<(wgpu::Device, wgpu::Queue)> {
+    async fn init_device_and_queue(
+        _surface: Option<&wgpu::Surface<'_>>,
+    ) -> RenderResult<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -209,10 +400,23 @@ impl WgpuBackend {
         })
     }
 
-    /// Create the quad render pipeline.
+    /// Create the quad render pipeline with default format.
     fn create_quad_pipeline(
         device: &wgpu::Device,
         bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        Self::create_quad_pipeline_with_format(
+            device,
+            bind_group_layout,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        )
+    }
+
+    /// Create the quad render pipeline with a specific texture format.
+    fn create_quad_pipeline_with_format(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Quad Shader"),
@@ -239,7 +443,7 @@ impl WgpuBackend {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -264,9 +468,232 @@ impl WgpuBackend {
         })
     }
 
+    /// Create the textured bind group layout.
+    fn create_textured_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Textured Bind Group Layout"),
+            entries: &[
+                // Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// Create the textured quad pipeline with a specific texture format.
+    fn create_textured_pipeline_with_format(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Textured Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/textured.wgsl").into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Textured Pipeline Layout"),
+            bind_group_layouts: &[bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Textured Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    /// Create a linear filtering sampler.
+    fn create_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Texture Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        })
+    }
+
+    /// Create a GPU texture from RGBA pixel data.
+    fn texture_from_rgba(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        label: &str,
+    ) -> RenderResult<CachedTexture> {
+        let expected_size = (width * height * 4) as usize;
+        if data.len() != expected_size {
+            return Err(RenderError::Frame(format!(
+                "Invalid texture data size: expected {expected_size}, got {}",
+                data.len()
+            )));
+        }
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Ok(CachedTexture { texture, view })
+    }
+
+    /// Remove a texture from the cache.
+    pub fn invalidate_texture(&mut self, key: &str) {
+        self.texture_cache.remove(key);
+    }
+
+    /// Clear all cached textures.
+    pub fn clear_texture_cache(&mut self) {
+        self.texture_cache.clear();
+        tracing::debug!("Texture cache cleared");
+    }
+
     /// Set the background color.
     pub fn set_background_color(&mut self, r: f64, g: f64, b: f64, a: f64) {
         self.background_color = wgpu::Color { r, g, b, a };
+    }
+
+    /// Reconfigure the surface with current settings.
+    ///
+    /// Call this after surface lost/outdated errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no surface is configured.
+    pub fn reconfigure_surface(&mut self) -> RenderResult<()> {
+        if let (Some(surface), Some(config)) = (&self.surface, &self.surface_config) {
+            surface.configure(&self.device, config);
+            tracing::debug!("Surface reconfigured: {}x{}", config.width, config.height);
+            Ok(())
+        } else {
+            Err(RenderError::Surface(
+                "No surface to reconfigure".to_string(),
+            ))
+        }
+    }
+
+    /// Drop the surface (for suspend/minimize).
+    ///
+    /// The surface can be recreated by calling `from_window` again.
+    pub fn drop_surface(&mut self) {
+        self.surface = None;
+        self.surface_config = None;
+        tracing::debug!("Surface dropped");
+    }
+
+    /// Check if a surface is configured.
+    #[must_use]
+    pub fn has_surface(&self) -> bool {
+        self.surface.is_some()
+    }
+
+    /// Get the current scale factor.
+    #[must_use]
+    pub fn scale_factor(&self) -> f64 {
+        self.scale_factor
+    }
+
+    /// Set the scale factor (for Retina/HiDPI displays).
+    pub fn set_scale_factor(&mut self, factor: f64) {
+        if (self.scale_factor - factor).abs() > f64::EPSILON {
+            tracing::info!("Scale factor changed: {} -> {}", self.scale_factor, factor);
+            self.scale_factor = factor;
+        }
     }
 
     /// Get the wgpu device.
@@ -292,7 +719,7 @@ impl WgpuBackend {
         width: u32,
         height: u32,
     ) -> RenderResult<()> {
-        let caps = surface.get_capabilities(&self.get_adapter()?);
+        let caps = surface.get_capabilities(&self.get_adapter(Some(&surface))?);
         let format = caps
             .formats
             .iter()
@@ -324,7 +751,10 @@ impl WgpuBackend {
     }
 
     /// Get the adapter (recreate if needed).
-    fn get_adapter(&self) -> RenderResult<wgpu::Adapter> {
+    fn get_adapter(
+        &self,
+        compat_surface: Option<&wgpu::Surface<'_>>,
+    ) -> RenderResult<wgpu::Adapter> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -332,10 +762,29 @@ impl WgpuBackend {
 
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: self.surface.as_ref(),
+            compatible_surface: compat_surface.or(self.surface.as_ref()),
             force_fallback_adapter: false,
         }))
         .ok_or_else(|| RenderError::GpuInit("Failed to get adapter".to_string()))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn configure_canvas_surface(
+        &mut self,
+        canvas: HtmlCanvasElement,
+        width: u32,
+        height: u32,
+    ) -> RenderResult<()> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(|e| RenderError::Surface(e.to_string()))?;
+
+        self.configure_surface(surface, width, height)
     }
 
     /// Render a single element as a colored quad.
@@ -405,6 +854,154 @@ impl WgpuBackend {
         render_pass.draw_indexed(0..6, 0, 0..1);
     }
 
+    /// Render a single element as a textured quad.
+    #[allow(clippy::cast_precision_loss)] // Canvas dimensions fit in f32 mantissa (max ~16M)
+    fn render_textured_element(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        element: &Element,
+        texture_view: &wgpu::TextureView,
+        is_first: bool,
+    ) {
+        // Create uniforms (color is not used for textured rendering but keep struct compatible)
+        let uniforms = QuadUniforms {
+            transform: [
+                element.transform.x,
+                element.transform.y,
+                element.transform.width,
+                element.transform.height,
+            ],
+            canvas_size: [self.width as f32, self.height as f32, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0], // White (texture color will be used as-is)
+        };
+
+        // Update uniform buffer
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // Create bind group with texture
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Textured Element Bind Group"),
+            layout: &self.textured_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        // Create render pass
+        let load_op = if is_first {
+            wgpu::LoadOp::Clear(self.background_color)
+        } else {
+            wgpu::LoadOp::Load
+        };
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Textured Element Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_pipeline(&self.textured_pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..6, 0, 0..1);
+    }
+
+    /// Render a chart element to a texture, caching the result.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_chart_texture(
+        &mut self,
+        element: &Element,
+        chart_type: &str,
+        data: &serde_json::Value,
+    ) -> RenderResult<()> {
+        let key = element.id.to_string();
+
+        // Skip if already cached
+        if self.texture_cache.contains_key(&key) {
+            return Ok(());
+        }
+
+        // Parse chart config and render to buffer
+        let width = element.transform.width as u32;
+        let height = element.transform.height as u32;
+
+        let config = parse_chart_config(chart_type, data, width, height)?;
+        let rgba_data = render_chart_to_buffer(&config)?;
+
+        // Create GPU texture
+        let label = format!("Chart: {key}");
+        let cached = self.texture_from_rgba(&rgba_data, width, height, &label)?;
+        self.texture_cache.insert(key, cached);
+
+        tracing::debug!("Created chart texture {}x{}", width, height);
+
+        Ok(())
+    }
+
+    /// Render an image element to a texture, caching the result.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_image_texture(&mut self, element: &Element, src: &str) -> RenderResult<()> {
+        let key = element.id.to_string();
+
+        // Skip if already cached
+        if self.texture_cache.contains_key(&key) {
+            return Ok(());
+        }
+
+        // Load image from data URI or create placeholder
+        let texture_data = if src.starts_with("data:") {
+            load_image_from_data_uri(src)?
+        } else {
+            // For non-data URIs, create a placeholder
+            // TODO: Support file loading in native builds
+            tracing::warn!("Non-data URI images not yet supported: {}", src);
+            let width = element.transform.width as u32;
+            let height = element.transform.height as u32;
+            create_placeholder(width, height)
+        };
+
+        // Create GPU texture
+        let label = format!("Image: {key}");
+        let cached = self.texture_from_rgba(
+            &texture_data.data,
+            texture_data.width,
+            texture_data.height,
+            &label,
+        )?;
+        self.texture_cache.insert(key, cached);
+
+        tracing::debug!(
+            "Created image texture {}x{}",
+            texture_data.width,
+            texture_data.height
+        );
+
+        Ok(())
+    }
+
     /// Get the display color for an element based on its kind.
     fn get_element_color(element: &Element) -> [f32; 4] {
         // If selected, use selection color
@@ -430,19 +1027,84 @@ impl WgpuBackend {
     fn parse_hex_color(hex: &str) -> Option<[f32; 4]> {
         let hex = hex.trim_start_matches('#');
 
-        if hex.len() == 6 {
-            let r = f32::from(u8::from_str_radix(&hex[0..2], 16).ok()?) / 255.0;
-            let g = f32::from(u8::from_str_radix(&hex[2..4], 16).ok()?) / 255.0;
-            let b = f32::from(u8::from_str_radix(&hex[4..6], 16).ok()?) / 255.0;
-            Some([r, g, b, 1.0])
-        } else if hex.len() == 8 {
-            let r = f32::from(u8::from_str_radix(&hex[0..2], 16).ok()?) / 255.0;
-            let g = f32::from(u8::from_str_radix(&hex[2..4], 16).ok()?) / 255.0;
-            let b = f32::from(u8::from_str_radix(&hex[4..6], 16).ok()?) / 255.0;
-            let a = f32::from(u8::from_str_radix(&hex[6..8], 16).ok()?) / 255.0;
-            Some([r, g, b, a])
-        } else {
-            None
+        // Helper to parse a hex byte at a given offset
+        let parse_byte = |offset: usize| -> Option<f32> {
+            let byte = u8::from_str_radix(&hex[offset..offset + 2], 16).ok()?;
+            Some(f32::from(byte) / 255.0)
+        };
+
+        match hex.len() {
+            6 => Some([parse_byte(0)?, parse_byte(2)?, parse_byte(4)?, 1.0]),
+            8 => Some([
+                parse_byte(0)?,
+                parse_byte(2)?,
+                parse_byte(4)?,
+                parse_byte(6)?,
+            ]),
+            _ => None,
+        }
+    }
+
+    /// Render scene elements to a texture view.
+    ///
+    /// Handles both empty scenes (clears to background) and scenes with elements.
+    /// For Chart and Image elements, renders textures; otherwise renders colored quads.
+    fn render_scene_elements(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        scene: &Scene,
+    ) {
+        let elements: Vec<_> = scene.elements().cloned().collect();
+
+        if elements.is_empty() {
+            // Clear to background color
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.background_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            return;
+        }
+
+        // First pass: Prepare textures for Chart and Image elements
+        for element in &elements {
+            match &element.kind {
+                ElementKind::Chart { chart_type, data } => {
+                    if let Err(e) = self.render_chart_texture(element, chart_type, data) {
+                        tracing::warn!("Failed to render chart texture: {e}");
+                    }
+                }
+                ElementKind::Image { src, .. } => {
+                    if let Err(e) = self.render_image_texture(element, src) {
+                        tracing::warn!("Failed to render image texture: {e}");
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Second pass: Render all elements
+        for (i, element) in elements.iter().enumerate() {
+            let is_first = i == 0;
+            let key = element.id.to_string();
+
+            // Check if we have a cached texture for this element
+            if let Some(cached) = self.texture_cache.get(&key) {
+                self.render_textured_element(encoder, view, element, &cached.view, is_first);
+            } else {
+                // Fallback to colored quad for non-textured elements
+                self.render_element_quad(encoder, view, element, is_first);
+            }
         }
     }
 
@@ -474,30 +1136,7 @@ impl WgpuBackend {
                 label: Some("Offscreen Encoder"),
             });
 
-        // Render all elements
-        let elements: Vec<_> = scene.elements().collect();
-
-        if elements.is_empty() {
-            // Clear to background color
-            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.background_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        } else {
-            for (i, element) in elements.iter().enumerate() {
-                self.render_element_quad(&mut encoder, &view, element, i == 0);
-            }
-        }
+        self.render_scene_elements(&mut encoder, &view, scene);
 
         // Copy texture to buffer
         let buffer_size = u64::from(self.width) * u64::from(self.height) * 4;
@@ -576,9 +1215,31 @@ impl RenderBackend for WgpuBackend {
             return Ok(());
         };
 
-        let output = surface
-            .get_current_texture()
-            .map_err(|e| RenderError::Surface(format!("Failed to get surface texture: {e}")))?;
+        // Handle surface errors with recovery
+        let output = match surface.get_current_texture() {
+            Ok(output) => output,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                tracing::warn!("Surface lost/outdated, reconfiguring...");
+                // Need to reborrow surface after reconfigure
+                self.reconfigure_surface()?;
+                // Retry getting texture
+                self.surface
+                    .as_ref()
+                    .ok_or_else(|| RenderError::Surface("Surface lost during reconfigure".into()))?
+                    .get_current_texture()
+                    .map_err(|e| RenderError::Surface(format!("Failed after reconfigure: {e}")))?
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                tracing::warn!("Surface timeout, skipping frame");
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                return Err(RenderError::Surface("GPU out of memory".to_string()));
+            }
+            Err(wgpu::SurfaceError::Other) => {
+                return Err(RenderError::Surface("Unknown surface error".to_string()));
+            }
+        };
 
         let view = output
             .texture
@@ -590,30 +1251,7 @@ impl RenderBackend for WgpuBackend {
                 label: Some("Render Encoder"),
             });
 
-        // Render all elements
-        let elements: Vec<_> = scene.elements().collect();
-
-        if elements.is_empty() {
-            // Clear to background color
-            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.background_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        } else {
-            for (i, element) in elements.iter().enumerate() {
-                self.render_element_quad(&mut encoder, &view, element, i == 0);
-            }
-        }
+        self.render_scene_elements(&mut encoder, &view, scene);
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

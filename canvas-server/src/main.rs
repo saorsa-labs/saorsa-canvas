@@ -5,63 +5,104 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    http::StatusCode,
+    extract::{ws::WebSocketUpgrade, State},
+    http::{header, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use canvas_core::Scene;
+use canvas_core::SceneDocument;
 use canvas_mcp::{CanvasMcpServer, JsonRpcRequest, JsonRpcResponse};
-use futures::{SinkExt, StreamExt};
-use tokio::sync::broadcast;
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::CorsLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     services::ServeDir,
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::Level;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-mod agui;
-mod routes;
-
-/// Scene change event for WebSocket broadcast.
-#[derive(Debug, Clone)]
-struct SceneChangeEvent {
-    /// Session ID that changed.
-    session_id: String,
-    /// JSON representation of the scene update.
-    payload: String,
-}
-
-/// Shared application state.
-#[derive(Clone)]
-struct AppState {
-    /// MCP server instance.
-    mcp: Arc<CanvasMcpServer>,
-    /// Broadcast channel for scene changes.
-    scene_tx: broadcast::Sender<SceneChangeEvent>,
-}
+use canvas_server::agui;
+use canvas_server::communitas::{self, ClientDescriptor, CommunitasMcpClient};
+use canvas_server::health;
+use canvas_server::metrics;
+use canvas_server::routes;
+use canvas_server::sync::{self, current_timestamp, handle_sync_socket, SyncOrigin, SyncState};
+use canvas_server::AppState;
+use metrics_exporter_prometheus::PrometheusHandle;
 
 /// Default port for the canvas server.
 const DEFAULT_PORT: u16 = 9473; // "SAOR" on phone keypad
 
+/// Build a CORS layer that only allows localhost origins.
+///
+/// This is a security measure to ensure the server only accepts requests from
+/// the local machine. The server is designed to run on localhost only.
+fn build_cors_layer(port: u16) -> CorsLayer {
+    // Allowed localhost origins with the configured port
+    let localhost_origins = [
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        // Also allow common development ports for dev servers
+        "http://localhost:3000".to_string(),
+        "http://localhost:5173".to_string(), // Vite
+        "http://localhost:8080".to_string(),
+        "http://127.0.0.1:3000".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+        "http://127.0.0.1:8080".to_string(),
+    ];
+
+    let origins: Vec<HeaderValue> = localhost_origins
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
+        .allow_credentials(true)
+}
+
+/// Initialize structured tracing with optional JSON format.
+///
+/// Set `RUST_LOG` to control log levels (default: info,canvas_server=debug,tower_http=debug).
+/// Set `RUST_LOG_FORMAT=json` for JSON output (recommended for production).
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,canvas_server=debug,tower_http=debug"));
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_file(true)
+        .with_line_number(true);
+
+    // Use JSON format in production (RUST_LOG_FORMAT=json)
+    if std::env::var("RUST_LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer.json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .init();
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "canvas_server=debug,tower_http=debug".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Initialize tracing with optional JSON format
+    init_tracing();
+
+    // Initialize Prometheus metrics
+    let metrics_handle = metrics::init_metrics();
+    tracing::info!("Prometheus metrics initialized");
 
     let port = std::env::var("CANVAS_PORT")
         .ok()
@@ -80,40 +121,32 @@ async fn main() -> anyhow::Result<()> {
     let web_service = ServeDir::new(&web_dir);
     let pkg_service = ServeDir::new(&pkg_dir);
 
-    // Create broadcast channel for scene changes (capacity: 100 messages)
-    let (scene_tx, _) = broadcast::channel::<SceneChangeEvent>(100);
-    let scene_tx_clone = scene_tx.clone();
+    // Create sync state for WebSocket scene synchronization
+    let sync_state = SyncState::new();
+    let communitas_client = init_communitas_client(&sync_state).await;
 
     // Create MCP server with change notification callback
-    let mut mcp = CanvasMcpServer::new();
+    let scene_tx = sync_state.sender();
+    let mut mcp = CanvasMcpServer::new(sync_state.store());
     mcp.set_on_change(move |session_id, scene| {
-        let event = SceneChangeEvent {
+        let document = SceneDocument::from_scene(session_id, scene, current_timestamp());
+        let event = sync::SyncEvent {
             session_id: session_id.to_string(),
-            payload: serde_json::json!({
-                "type": "scene_update",
-                "session_id": session_id,
-                "element_count": scene.element_count(),
-                "timestamp": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            })
-            .to_string(),
+            message: sync::ServerMessage::SceneUpdate { scene: document },
+            origin: sync::SyncOrigin::Local,
         };
         // Ignore send errors (no receivers is okay)
-        let _ = scene_tx_clone.send(event);
+        let _ = scene_tx.send(event);
     });
 
-    // Create shared scene for AG-UI
-    let scene = Arc::new(RwLock::new(Scene::new(800.0, 600.0)));
-
     // Create AG-UI state
-    let agui_state = agui::AgUiState::new(scene);
+    let agui_state = agui::AgUiState::new(sync_state.clone());
 
-    // Create shared state with MCP server
+    // Create shared state with MCP server and sync
     let state = AppState {
         mcp: Arc::new(mcp),
-        scene_tx,
+        sync: sync_state.clone(),
+        communitas: communitas_client,
     };
 
     // Build AG-UI router
@@ -122,16 +155,27 @@ async fn main() -> anyhow::Result<()> {
         .route("/render", post(agui::render_handler))
         .with_state(agui_state);
 
+    // Build metrics router with PrometheusHandle
+    let metrics_router = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .with_state(metrics_handle);
+
     // Build the router
     let app = Router::new()
-        // API routes
-        .route("/health", get(health_handler))
+        // Metrics endpoint (separate state)
+        .merge(metrics_router)
+        // Health check endpoints (Kubernetes probes)
+        .route("/health/live", get(health::liveness))
+        .route("/health/ready", get(health::readiness))
+        .route("/health", get(health::readiness)) // Backward compatible
         .route("/ws", get(websocket_handler))
+        .route("/ws/sync", get(sync_websocket_handler))
         .route("/mcp", post(mcp_handler))
         .route(
             "/api/scene",
-            get(routes::get_scene).post(routes::update_scene),
+            get(routes::get_scene_handler).post(routes::update_scene_handler),
         )
+        .route("/api/scene/{session_id}", get(routes::get_session_scene))
         // AG-UI endpoints
         .nest("/ag-ui", agui_router)
         // Serve WASM package at /pkg
@@ -141,8 +185,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/sw.js", get(sw_handler))
         // Fallback to index.html for SPA
         .fallback_service(web_service)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
-        .layer(TraceLayer::new_for_http())
+        // Request ID for distributed tracing correlation
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        // CORS configuration - restricted to localhost only for security
+        .layer(build_cors_layer(port))
+        // Structured request tracing with timing
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state);
 
     // Bind to localhost ONLY (security requirement)
@@ -175,132 +229,89 @@ async fn sw_handler() -> impl IntoResponse {
     )
 }
 
-/// Health check endpoint.
-async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION")
-    }))
+/// Prometheus metrics endpoint.
+#[tracing::instrument(name = "metrics", skip(handle))]
+async fn metrics_handler(State(handle): State<PrometheusHandle>) -> impl IntoResponse {
+    handle.render()
 }
 
 /// MCP JSON-RPC endpoint.
+#[tracing::instrument(name = "mcp_handler", skip(state, request), fields(method = %request.method))]
 async fn mcp_handler(
     State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    tracing::info!("MCP request: {}", request.method);
+    tracing::debug!("Processing MCP request");
     let response = state.mcp.handle_request(request).await;
     Json(response)
 }
 
-/// WebSocket handler for real-time communication.
+/// Legacy WebSocket handler (backwards compatible).
+#[tracing::instrument(name = "websocket_connect", skip(ws, state))]
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.scene_tx.subscribe()))
+    tracing::info!("WebSocket connection upgrade requested");
+    ws.on_upgrade(move |socket| handle_sync_socket(socket, state.sync))
 }
 
-/// Handle a WebSocket connection.
-async fn handle_socket(socket: WebSocket, mut scene_rx: broadcast::Receiver<SceneChangeEvent>) {
-    let (mut sender, mut receiver) = socket.split();
+/// Sync WebSocket handler for real-time scene synchronization.
+#[tracing::instrument(name = "sync_websocket_connect", skip(ws, state))]
+async fn sync_websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    tracing::info!("Sync WebSocket connection upgrade requested");
+    ws.on_upgrade(move |socket| handle_sync_socket(socket, state.sync))
+}
 
-    // Send welcome message
-    let welcome = serde_json::json!({
-        "type": "welcome",
-        "version": env!("CARGO_PKG_VERSION")
-    });
+/// Initialize Communitas MCP client for upstream scene synchronization.
+#[tracing::instrument(name = "init_communitas", skip(sync_state))]
+async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpClient> {
+    let url = match std::env::var("COMMUNITAS_MCP_URL") {
+        Ok(url) => url,
+        Err(_) => return None,
+    };
 
-    if sender
-        .send(Message::Text(welcome.to_string().into()))
-        .await
-        .is_err()
-    {
-        return;
+    let descriptor = ClientDescriptor {
+        name: "saorsa-canvas-server".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+
+    let client = match CommunitasMcpClient::new(url.as_str(), descriptor) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!("Failed to configure Communitas MCP client: {}", err);
+            return None;
+        }
+    };
+
+    if let Err(err) = client.initialize().await {
+        tracing::error!("Communitas MCP initialize failed: {}", err);
+        return None;
     }
 
-    tracing::info!("WebSocket client connected");
-
-    // Handle incoming messages and broadcast scene updates concurrently
-    loop {
-        tokio::select! {
-            // Handle incoming WebSocket messages
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        tracing::debug!("Received: {}", text);
-
-                        // Parse and handle client messages
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                            let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                            match msg_type {
-                                "subscribe" => {
-                                    // Client subscribing to session updates
-                                    let session_id = parsed.get("session_id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("default");
-                                    let response = serde_json::json!({
-                                        "type": "subscribed",
-                                        "session_id": session_id
-                                    });
-                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                "ping" => {
-                                    // Respond to ping with pong
-                                    let response = serde_json::json!({ "type": "pong" });
-                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                _ => {
-                                    // Echo unknown messages back with ack
-                                    let response = serde_json::json!({
-                                        "type": "ack",
-                                        "received": text.to_string()
-                                    });
-                                    if sender.send(Message::Text(response.to_string().into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!("Client disconnected");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        tracing::error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    None => break,
-                    _ => {}
-                }
-            }
-
-            // Broadcast scene updates to client
-            event = scene_rx.recv() => {
-                match event {
-                    Ok(scene_event) => {
-                        tracing::debug!("Broadcasting scene update for session: {}", scene_event.session_id);
-                        if sender.send(Message::Text(scene_event.payload.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket client lagged behind by {} messages", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("Broadcast channel closed");
-                        break;
-                    }
-                }
-            }
+    if let Ok(token) = std::env::var("COMMUNITAS_MCP_TOKEN") {
+        if let Err(err) = client.authenticate_with_token(token.trim()).await {
+            tracing::error!("Communitas delegate authentication failed: {}", err);
+            return None;
         }
     }
 
-    tracing::info!("WebSocket connection closed");
+    match client.fetch_scene("default").await {
+        Ok(document) => match document.clone().into_scene() {
+            Ok(scene) => {
+                if let Err(err) = sync_state.replace_scene("default", scene, SyncOrigin::Remote) {
+                    tracing::warn!("Failed to cache Communitas scene: {}", err);
+                }
+            }
+            Err(err) => tracing::warn!("Failed to convert Communitas scene: {}", err),
+        },
+        Err(err) => tracing::warn!("Communitas fetch_scene failed: {}", err),
+    }
+
+    communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
+    tracing::info!("Communitas MCP client connected at {}", url);
+    Some(client)
 }

@@ -4,7 +4,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::{CanvasState, Scene};
+use crate::{CanvasState, Scene, SceneDocument};
 
 /// Initialize the canvas WASM module.
 #[wasm_bindgen(start)]
@@ -48,6 +48,18 @@ impl WasmCanvas {
     #[wasm_bindgen(js_name = updateSceneFromJson)]
     pub fn update_scene_from_json(&mut self, json: &str) -> Result<(), String> {
         self.scene = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Apply a canonical scene document serialized as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if parsing or conversion fails.
+    #[wasm_bindgen(js_name = applySceneDocument)]
+    pub fn apply_scene_document(&mut self, json: &str) -> Result<(), String> {
+        let document: SceneDocument = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        self.scene = document.into_scene()?;
         Ok(())
     }
 

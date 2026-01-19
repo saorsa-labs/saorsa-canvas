@@ -19,7 +19,7 @@ default = []
 [dependencies]
 # Core canvas types and renderer
 canvas-core = { path = "../canvas-core" }
-canvas-renderer = { path = "../canvas-renderer", default-features = false }
+canvas-renderer = { path = "../canvas-renderer", default-features = false, features = ["gpu", "wasm"] }
 
 # Serialization
 serde.workspace = true

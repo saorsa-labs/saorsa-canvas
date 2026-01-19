@@ -7,6 +7,10 @@ license.workspace = true
 
 description = "Local embedded Axum server for Saorsa Canvas. Serves the PWA and handles WebRTC signaling."
 
+[lib]
+name = "canvas_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "saorsa-canvas"
 path = "src/main.rs"
@@ -16,6 +20,8 @@ path = "src/main.rs"
 canvas-core = { path = "../canvas-core" }
 canvas-renderer = { path = "../canvas-renderer" }
 canvas-mcp = { path = "../canvas-mcp" }
+reqwest = { version = "0.12", features = ["json"] }
+url = "2"
 
 # Async runtime
 tokio.workspace = true
@@ -44,5 +50,12 @@ tower-http.workspace = true
 # UUID
 uuid.workspace = true
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }
+wiremock = "0.6"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+portpicker = "0.1"

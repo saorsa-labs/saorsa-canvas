@@ -6,6 +6,7 @@ members = [
     "canvas-server",
     "canvas-mcp",
     "canvas-app",
+    "canvas-desktop",
 ]
 
 [workspace.package]
@@ -33,12 +34,12 @@ thiserror = "1.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Web server
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace", "request-id"] }
 
 # Graphics (wgpu)
 wgpu = "24"
@@ -79,6 +80,13 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 
 # Base64 for binary encoding
 base64 = "0.22"
+
+# CLI parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+url = "2.5"
 
 [profile.release]
 lto = true

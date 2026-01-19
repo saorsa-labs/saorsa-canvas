@@ -1,0 +1,29 @@
+[package]
+name = "canvas-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+description = "Native desktop host for Saorsa Canvas using winit + wgpu."
+
+[[bin]]
+name = "canvas-desktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+canvas-core = { path = "../canvas-core" }
+canvas-renderer = { path = "../canvas-renderer", features = ["gpu"] }
+pollster = "0.4"
+winit.workspace = true
+wgpu.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+url.workspace = true
+thiserror.workspace = true
+serde.workspace = true

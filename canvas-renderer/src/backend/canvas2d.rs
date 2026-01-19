@@ -26,70 +26,48 @@ impl Canvas2DBackend {
     }
 
     /// Render a single element to the 2D context.
+    ///
+    /// Logs element information for debugging purposes.
     fn render_element(element: &Element) {
         let t = &element.transform;
+        let (kind_name, details) = Self::element_description(&element.kind);
 
-        match &element.kind {
+        tracing::trace!(
+            "Render {kind_name} at ({}, {}) size {}x{}{details}",
+            t.x,
+            t.y,
+            t.width,
+            t.height
+        );
+    }
+
+    /// Get a description of an element kind for logging.
+    fn element_description(kind: &ElementKind) -> (&'static str, String) {
+        match kind {
             ElementKind::Text {
                 content,
                 font_size,
                 color,
-            } => {
-                tracing::trace!(
-                    "Render text '{}' at ({}, {}) size {} color {}",
-                    content,
-                    t.x,
-                    t.y,
-                    font_size,
-                    color
-                );
-            }
+            } => (
+                "text",
+                format!(" content='{content}' font={font_size} color={color}"),
+            ),
             ElementKind::Image { src, format } => {
-                tracing::trace!(
-                    "Render image {:?} from {} at ({}, {})",
-                    format,
-                    src,
-                    t.x,
-                    t.y
-                );
+                ("image", format!(" src={src} format={format:?}"))
             }
-            ElementKind::Chart { chart_type, .. } => {
-                tracing::trace!(
-                    "Render {} chart at ({}, {}) size {}x{}",
-                    chart_type,
-                    t.x,
-                    t.y,
-                    t.width,
-                    t.height
-                );
-            }
-            ElementKind::Model3D { .. } => {
-                // In 2D fallback mode, show a placeholder for 3D models
-                tracing::trace!(
-                    "Render 3D placeholder at ({}, {}) - 3D not supported in 2D mode",
-                    t.x,
-                    t.y
-                );
-            }
-            ElementKind::Video { stream_id, .. } => {
-                tracing::trace!(
-                    "Render video stream {} at ({}, {}) size {}x{}",
-                    stream_id,
-                    t.x,
-                    t.y,
-                    t.width,
-                    t.height
-                );
-            }
+            ElementKind::Chart { chart_type, .. } => ("chart", format!(" type={chart_type}")),
+            ElementKind::Model3D { .. } => (
+                "3D placeholder",
+                " (3D not supported in 2D mode)".to_string(),
+            ),
+            ElementKind::Video { stream_id, .. } => ("video", format!(" stream={stream_id}")),
             ElementKind::OverlayLayer { children, opacity } => {
-                tracing::trace!(
-                    "Render overlay layer with {} children at opacity {}",
-                    children.len(),
-                    opacity
-                );
+                let count = children.len();
+                ("overlay", format!(" children={count} opacity={opacity}"))
             }
             ElementKind::Group { children } => {
-                tracing::trace!("Render group with {} children", children.len());
+                let count = children.len();
+                ("group", format!(" children={count}"))
             }
         }
     }

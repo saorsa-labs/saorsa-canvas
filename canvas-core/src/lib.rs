@@ -33,13 +33,18 @@ pub mod event;
 pub mod fusion;
 pub mod offline;
 pub mod scene;
+pub mod schema;
 pub mod state;
+pub mod store;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use a2ui::{A2UINode, A2UIStyle, A2UITree, ConversionResult};
-pub use element::{CropRect, Element, ElementId, ElementKind, ImageFormat, Transform};
+pub use element::{
+    CropRect, Element, ElementId, ElementKind, ImageFormat, MediaConfig, MediaStats, QualityPreset,
+    Resolution, Transform,
+};
 pub use error::{CanvasError, CanvasResult};
 pub use event::{InputEvent, TouchEvent, TouchPhase, TouchPoint};
 pub use fusion::{
@@ -47,7 +52,9 @@ pub use fusion::{
 };
 pub use offline::{ConflictResolution, ConflictStrategy, OfflineQueue, Operation, SyncResult};
 pub use scene::Scene;
+pub use schema::{ElementDocument, SceneDocument, ViewportDocument};
 pub use state::{CanvasState, ConnectionStatus};
+pub use store::{SceneStore, StoreError};
 
 /// Canvas core version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -9,7 +9,7 @@ use canvas_core::Scene;
 use crate::{BackendType, RenderResult};
 
 /// Trait for rendering backends.
-pub trait RenderBackend: Send {
+pub trait RenderBackend {
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
 

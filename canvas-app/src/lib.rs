@@ -30,13 +30,19 @@
 #![deny(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use canvas_core::{
-    CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, TouchEvent, TouchPhase,
-    TouchPoint, Transform,
+    CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, SceneDocument, TouchEvent,
+    TouchPhase, TouchPoint, Transform,
 };
-use canvas_renderer::chart::{parse_chart_config, render_chart_to_buffer};
+use canvas_renderer::{
+    chart::{parse_chart_config, render_chart_to_buffer},
+    BackendType, RenderBackend, RenderResult, Renderer, RendererConfig,
+};
+
+#[cfg(target_arch = "wasm32")]
+use canvas_renderer::backend::wgpu::WgpuBackend;
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
@@ -69,21 +75,363 @@ struct VideoFrame {
     timestamp: f64,
 }
 
-/// The main canvas application for WASM.
-#[wasm_bindgen]
-pub struct CanvasApp {
+type RendererHandle = Rc<RefCell<DomRendererState>>;
+
+struct DomRendererState {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
-    scene: Scene,
-    state: CanvasState,
     width: u32,
     height: u32,
     background_color: String,
-    frame_count: u64,
-    /// Cache for rendered charts (keyed by element ID).
     chart_cache: HashMap<ElementId, RenderedChart>,
-    /// Cache for video frames (keyed by stream ID).
     video_frames: HashMap<String, VideoFrame>,
+}
+
+impl DomRendererState {
+    fn new(canvas: HtmlCanvasElement, ctx: CanvasRenderingContext2d) -> Self {
+        let width = canvas.width();
+        let height = canvas.height();
+        Self {
+            canvas,
+            ctx,
+            width,
+            height,
+            background_color: "#ffffff".to_string(),
+            chart_cache: HashMap::new(),
+            video_frames: HashMap::new(),
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
+        self.width = width;
+        self.height = height;
+    }
+
+    fn set_background_color(&mut self, color: &str) {
+        self.background_color = color.to_string();
+    }
+
+    fn clear_dynamic_content(&mut self) {
+        self.chart_cache.clear();
+        self.video_frames.clear();
+    }
+}
+
+struct DomCanvasBackend {
+    state: RendererHandle,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn try_webgpu_backend(canvas: &HtmlCanvasElement) -> Option<Box<dyn RenderBackend>> {
+    match WgpuBackend::from_canvas(canvas.clone()) {
+        Ok(backend) => {
+            tracing::info!("WebGPU backend initialized");
+            Some(Box::new(backend))
+        }
+        Err(err) => {
+            tracing::warn!("WebGPU unavailable, falling back to Canvas2D: {}", err);
+            None
+        }
+    }
+}
+
+impl DomRendererState {
+    fn render_scene(&mut self, scene: &Scene) {
+        self.ctx.set_fill_style_str(&self.background_color);
+        self.ctx
+            .fill_rect(0.0, 0.0, f64::from(self.width), f64::from(self.height));
+
+        let mut elements: Vec<_> = scene.elements().cloned().collect();
+        elements.sort_by_key(|e| e.transform.z_index);
+
+        for element in &elements {
+            self.render_element(element);
+        }
+    }
+
+    fn render_element(&mut self, element: &Element) {
+        let t = &element.transform;
+
+        if let ElementKind::Chart { chart_type, data } = &element.kind {
+            self.render_chart(element, chart_type, data);
+        } else if let ElementKind::Video { stream_id, .. } = &element.kind {
+            self.render_video(element, stream_id);
+        } else {
+            let fill_color = Self::get_element_color(element);
+            self.ctx.set_fill_style_str(&fill_color);
+            self.ctx.fill_rect(
+                f64::from(t.x),
+                f64::from(t.y),
+                f64::from(t.width),
+                f64::from(t.height),
+            );
+
+            self.ctx.set_fill_style_str("#333333");
+            self.ctx.set_font("12px sans-serif");
+            let label = Self::get_element_label(element);
+            let _ = self
+                .ctx
+                .fill_text(&label, f64::from(t.x) + 5.0, f64::from(t.y) + 15.0);
+        }
+
+        if element.selected {
+            self.ctx.set_stroke_style_str("#0066ff");
+            self.ctx.set_line_width(2.0);
+            self.ctx.stroke_rect(
+                f64::from(t.x),
+                f64::from(t.y),
+                f64::from(t.width),
+                f64::from(t.height),
+            );
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_chart(&mut self, element: &Element, chart_type: &str, data: &serde_json::Value) {
+        let t = &element.transform;
+        let width = t.width as u32;
+        let height = t.height as u32;
+
+        if let Some(cached) = self.chart_cache.get(&element.id) {
+            if cached.width == width && cached.height == height {
+                self.draw_rgba_buffer(&cached.data, t.x, t.y, cached.width, cached.height);
+                return;
+            }
+        }
+
+        match parse_chart_config(chart_type, data, width, height) {
+            Ok(config) => match render_chart_to_buffer(&config) {
+                Ok(pixel_buffer) => {
+                    let canvas_buffer = Self::rgb_to_rgba(&pixel_buffer);
+
+                    self.chart_cache.insert(
+                        element.id,
+                        RenderedChart {
+                            data: canvas_buffer.clone(),
+                            width,
+                            height,
+                        },
+                    );
+
+                    self.draw_rgba_buffer(&canvas_buffer, t.x, t.y, width, height);
+                }
+                Err(e) => {
+                    tracing::warn!("Chart render error: {}", e);
+                    self.draw_chart_placeholder(t, chart_type);
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Chart config error: {}", e);
+                self.draw_chart_placeholder(t, chart_type);
+            }
+        }
+    }
+
+    fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+        let pixel_count = rgb.len() / 3;
+        let mut rgba = Vec::with_capacity(pixel_count * 4);
+
+        for i in 0..pixel_count {
+            rgba.push(rgb[i * 3]);
+            rgba.push(rgb[i * 3 + 1]);
+            rgba.push(rgb[i * 3 + 2]);
+            rgba.push(255);
+        }
+
+        rgba
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn draw_rgba_buffer(&self, data: &[u8], x: f32, y: f32, width: u32, height: u32) {
+        let clamped = wasm_bindgen::Clamped(data);
+        match ImageData::new_with_u8_clamped_array_and_sh(clamped, width, height) {
+            Ok(image_data) => {
+                if let Err(e) = self
+                    .ctx
+                    .put_image_data(&image_data, f64::from(x), f64::from(y))
+                {
+                    tracing::warn!("Failed to draw image data: {:?}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Failed to create ImageData: {:?}", e),
+        }
+    }
+
+    fn draw_chart_placeholder(&self, t: &Transform, chart_type: &str) {
+        self.ctx.set_fill_style_str("#e3f2fd");
+        self.ctx.fill_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        self.ctx.set_stroke_style_str("#90caf9");
+        self.ctx.set_line_width(1.0);
+        self.ctx.stroke_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        self.ctx.set_fill_style_str("#1976d2");
+        self.ctx.set_font("14px sans-serif");
+        let _ = self.ctx.fill_text(
+            &format!("Chart: {chart_type}"),
+            f64::from(t.x) + 10.0,
+            f64::from(t.y) + 25.0,
+        );
+
+        self.ctx.set_fill_style_str("#bbdefb");
+        let icon_x = f64::from(t.x) + f64::from(t.width) / 2.0 - 20.0;
+        let icon_y = f64::from(t.y) + f64::from(t.height) / 2.0 - 10.0;
+        self.ctx.fill_rect(icon_x, icon_y, 40.0, 20.0);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_video(&self, element: &Element, stream_id: &str) {
+        let t = &element.transform;
+
+        if let Some(frame) = self.video_frames.get(stream_id) {
+            self.draw_video_frame(frame, t);
+        } else {
+            self.draw_video_placeholder(t, stream_id);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn draw_video_frame(&self, frame: &VideoFrame, t: &Transform) {
+        let clamped = wasm_bindgen::Clamped(&frame.data[..]);
+
+        match ImageData::new_with_u8_clamped_array_and_sh(clamped, frame.width, frame.height) {
+            Ok(image_data) => {
+                if frame.width == t.width as u32 && frame.height == t.height as u32 {
+                    if let Err(e) =
+                        self.ctx
+                            .put_image_data(&image_data, f64::from(t.x), f64::from(t.y))
+                    {
+                        tracing::warn!("Failed to draw video frame: {:?}", e);
+                    }
+                } else if let Some(window) = web_sys::window() {
+                    if let Some(document) = window.document() {
+                        if let Ok(temp_canvas) = document.create_element("canvas") {
+                            if let Ok(temp_canvas) = temp_canvas.dyn_into::<HtmlCanvasElement>() {
+                                temp_canvas.set_width(frame.width);
+                                temp_canvas.set_height(frame.height);
+
+                                if let Ok(Some(temp_ctx)) = temp_canvas.get_context("2d") {
+                                    if let Ok(temp_ctx) =
+                                        temp_ctx.dyn_into::<CanvasRenderingContext2d>()
+                                    {
+                                        let _ = temp_ctx.put_image_data(&image_data, 0.0, 0.0);
+                                        let _ = self
+                                            .ctx
+                                            .draw_image_with_html_canvas_element_and_dw_and_dh(
+                                                &temp_canvas,
+                                                f64::from(t.x),
+                                                f64::from(t.y),
+                                                f64::from(t.width),
+                                                f64::from(t.height),
+                                            );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Failed to create video ImageData: {:?}", e),
+        }
+    }
+
+    fn draw_video_placeholder(&self, t: &Transform, stream_id: &str) {
+        self.ctx.set_fill_style_str("#212121");
+        self.ctx.fill_rect(
+            f64::from(t.x),
+            f64::from(t.y),
+            f64::from(t.width),
+            f64::from(t.height),
+        );
+
+        self.ctx.set_fill_style_str("#757575");
+        self.ctx.set_font("14px sans-serif");
+        self.ctx.set_text_align("center");
+        self.ctx.set_text_baseline("middle");
+
+        let center_x = f64::from(t.x) + f64::from(t.width) / 2.0;
+        let center_y = f64::from(t.y) + f64::from(t.height) / 2.0;
+
+        let _ = self
+            .ctx
+            .fill_text(&format!("Video: {stream_id}"), center_x, center_y - 10.0);
+        let _ = self.ctx.fill_text("No signal", center_x, center_y + 10.0);
+
+        self.ctx.set_text_align("start");
+        self.ctx.set_text_baseline("alphabetic");
+    }
+
+    fn get_element_color(element: &Element) -> String {
+        match &element.kind {
+            ElementKind::Chart { .. } => "#e3f2fd".to_string(),
+            ElementKind::Image { .. } => "#f5f5f5".to_string(),
+            ElementKind::Model3D { .. } => "#e8f5e9".to_string(),
+            ElementKind::Video { .. } => "#212121".to_string(),
+            ElementKind::OverlayLayer { opacity, .. } => format!("rgba(255, 255, 255, {opacity})"),
+            ElementKind::Text { color, .. } => color.clone(),
+            ElementKind::Group { .. } => "rgba(255, 253, 231, 0.5)".to_string(),
+        }
+    }
+
+    fn get_element_label(element: &Element) -> String {
+        match &element.kind {
+            ElementKind::Chart { chart_type, .. } => format!("Chart: {chart_type}"),
+            ElementKind::Image { .. } => "Image".to_string(),
+            ElementKind::Model3D { .. } => "3D Model".to_string(),
+            ElementKind::Video { stream_id, .. } => format!("Video: {stream_id}"),
+            ElementKind::OverlayLayer { children, .. } => format!("Overlay ({})", children.len()),
+            ElementKind::Text { content, .. } => {
+                if content.len() > 20 {
+                    format!("{}...", &content[..20])
+                } else {
+                    content.clone()
+                }
+            }
+            ElementKind::Group { children } => format!("Group ({})", children.len()),
+        }
+    }
+}
+
+impl RenderBackend for DomCanvasBackend {
+    fn backend_type(&self) -> BackendType {
+        BackendType::Canvas2D
+    }
+
+    fn render(&mut self, scene: &Scene) -> RenderResult<()> {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.render_scene(scene);
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> RenderResult<()> {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.resize(width, height);
+        }
+        Ok(())
+    }
+}
+
+/// The main canvas application for WASM.
+#[wasm_bindgen]
+pub struct CanvasApp {
+    scene: Scene,
+    state: CanvasState,
+    frame_count: u64,
+    renderer_state: RendererHandle,
+    renderer: Renderer,
 }
 
 #[wasm_bindgen]
@@ -119,35 +467,43 @@ impl CanvasApp {
         #[allow(clippy::cast_precision_loss)]
         let scene = Scene::new(width as f32, height as f32);
 
+        let renderer_state = Rc::new(RefCell::new(DomRendererState::new(canvas, ctx)));
+
+        #[cfg(target_arch = "wasm32")]
+        let mut backend: Box<dyn RenderBackend> = match try_webgpu_backend(&canvas) {
+            Some(webgpu) => webgpu,
+            None => Box::new(DomCanvasBackend {
+                state: Rc::clone(&renderer_state),
+            }),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let backend: Box<dyn RenderBackend> = Box::new(DomCanvasBackend {
+            state: Rc::clone(&renderer_state),
+        });
+
+        let preferred_backend = backend.backend_type();
+        let renderer = Renderer::with_backend(
+            backend,
+            RendererConfig {
+                preferred_backend,
+                ..RendererConfig::default()
+            },
+        );
+
         Ok(Self {
-            canvas,
-            ctx,
             scene,
             state: CanvasState::default(),
-            width,
-            height,
-            background_color: "#ffffff".to_string(),
             frame_count: 0,
-            chart_cache: HashMap::new(),
-            video_frames: HashMap::new(),
+            renderer_state,
+            renderer,
         })
     }
 
     /// Render the current scene to the canvas.
     pub fn render(&mut self) {
-        // Clear canvas
-        self.ctx.set_fill_style_str(&self.background_color);
-        self.ctx
-            .fill_rect(0.0, 0.0, f64::from(self.width), f64::from(self.height));
-
-        // Collect elements to render (to avoid borrow issues)
-        let elements: Vec<_> = self.scene.elements().cloned().collect();
-
-        // Render each element
-        for element in &elements {
-            self.render_element(element);
+        if let Err(err) = self.renderer.render(&self.scene) {
+            tracing::error!("Renderer error: {:?}", err);
         }
-
         self.frame_count += 1;
     }
 
@@ -241,6 +597,27 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = setSceneJson)]
     pub fn set_scene_json(&mut self, json: &str) -> Result<(), JsValue> {
         self.scene = serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.clear_dynamic_content();
+        }
+        Ok(())
+    }
+
+    /// Apply a canonical scene document serialized as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON is invalid or the scene cannot be converted.
+    #[wasm_bindgen(js_name = applySceneDocument)]
+    pub fn apply_scene_document(&mut self, json: &str) -> Result<(), JsValue> {
+        let document: SceneDocument = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("Scene parse error: {e}")))?;
+        self.scene = document
+            .into_scene()
+            .map_err(|e| JsValue::from_str(&format!("Scene conversion error: {e}")))?;
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.clear_dynamic_content();
+        }
         Ok(())
     }
 
@@ -261,17 +638,21 @@ impl CanvasApp {
     /// Resize the canvas.
     #[allow(clippy::cast_precision_loss)]
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.canvas.set_width(width);
-        self.canvas.set_height(height);
-        self.width = width;
-        self.height = height;
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.resize(width, height);
+        }
+        if let Err(err) = self.renderer.resize(width, height) {
+            tracing::warn!("Renderer resize failed: {:?}", err);
+        }
         self.scene.set_viewport(width as f32, height as f32);
     }
 
     /// Set the background color (CSS color string).
     #[wasm_bindgen(js_name = setBackgroundColor)]
     pub fn set_background_color(&mut self, color: &str) {
-        self.background_color = color.to_string();
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.set_background_color(color);
+        }
     }
 
     /// Check if connected to AI backend.
@@ -296,282 +677,6 @@ impl CanvasApp {
         }
     }
 
-    /// Render a single element to the canvas.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_element(&mut self, element: &Element) {
-        let t = &element.transform;
-
-        // Handle chart rendering specially
-        if let ElementKind::Chart { chart_type, data } = &element.kind {
-            self.render_chart(element, chart_type, data);
-        } else if let ElementKind::Video { stream_id, .. } = &element.kind {
-            self.render_video(element, stream_id);
-        } else {
-            // Set fill color based on element type
-            let fill_color = Self::get_element_color(element);
-            self.ctx.set_fill_style_str(&fill_color);
-
-            // Draw the element as a rectangle (placeholder for non-chart elements)
-            self.ctx.fill_rect(
-                f64::from(t.x),
-                f64::from(t.y),
-                f64::from(t.width),
-                f64::from(t.height),
-            );
-
-            // Draw element type label for non-chart elements
-            self.ctx.set_fill_style_str("#333333");
-            self.ctx.set_font("12px sans-serif");
-            let label = Self::get_element_label(element);
-            let _ = self
-                .ctx
-                .fill_text(&label, f64::from(t.x) + 5.0, f64::from(t.y) + 15.0);
-        }
-
-        // Draw selection highlight if selected
-        if element.selected {
-            self.ctx.set_stroke_style_str("#0066ff");
-            self.ctx.set_line_width(2.0);
-            self.ctx.stroke_rect(
-                f64::from(t.x),
-                f64::from(t.y),
-                f64::from(t.width),
-                f64::from(t.height),
-            );
-        }
-    }
-
-    /// Render a chart element using the chart rendering engine.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_chart(&mut self, element: &Element, chart_type: &str, data: &serde_json::Value) {
-        let t = &element.transform;
-        let width = t.width as u32;
-        let height = t.height as u32;
-
-        // Check if we have a cached render
-        if let Some(cached) = self.chart_cache.get(&element.id) {
-            // Use cached render if dimensions match
-            if cached.width == width && cached.height == height {
-                self.draw_rgba_buffer(&cached.data, t.x, t.y, cached.width, cached.height);
-                return;
-            }
-        }
-
-        // Parse chart config and render
-        match parse_chart_config(chart_type, data, width, height) {
-            Ok(config) => {
-                match render_chart_to_buffer(&config) {
-                    Ok(pixel_buffer) => {
-                        // Convert RGB to RGBA
-                        let canvas_buffer = Self::rgb_to_rgba(&pixel_buffer);
-
-                        // Cache the rendered chart
-                        self.chart_cache.insert(
-                            element.id,
-                            RenderedChart {
-                                data: canvas_buffer.clone(),
-                                width,
-                                height,
-                            },
-                        );
-
-                        // Draw to canvas
-                        self.draw_rgba_buffer(&canvas_buffer, t.x, t.y, width, height);
-                    }
-                    Err(e) => {
-                        // Fall back to placeholder on render error
-                        tracing::warn!("Chart render error: {}", e);
-                        self.draw_chart_placeholder(t, chart_type);
-                    }
-                }
-            }
-            Err(e) => {
-                // Fall back to placeholder on parse error
-                tracing::warn!("Chart config error: {}", e);
-                self.draw_chart_placeholder(t, chart_type);
-            }
-        }
-    }
-
-    /// Convert RGB buffer to RGBA buffer.
-    fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
-        let pixel_count = rgb.len() / 3;
-        let mut rgba = Vec::with_capacity(pixel_count * 4);
-
-        for i in 0..pixel_count {
-            rgba.push(rgb[i * 3]); // R
-            rgba.push(rgb[i * 3 + 1]); // G
-            rgba.push(rgb[i * 3 + 2]); // B
-            rgba.push(255); // A (fully opaque)
-        }
-
-        rgba
-    }
-
-    /// Draw an RGBA buffer to the canvas at the specified position.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn draw_rgba_buffer(&self, data: &[u8], x: f32, y: f32, width: u32, height: u32) {
-        // Create a clamped array from the RGBA data
-        let clamped = wasm_bindgen::Clamped(data);
-
-        // Create ImageData
-        match ImageData::new_with_u8_clamped_array_and_sh(clamped, width, height) {
-            Ok(image_data) => {
-                // Draw to canvas
-                if let Err(e) = self
-                    .ctx
-                    .put_image_data(&image_data, f64::from(x), f64::from(y))
-                {
-                    tracing::warn!("Failed to draw image data: {:?}", e);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create ImageData: {:?}", e);
-            }
-        }
-    }
-
-    /// Draw a placeholder for charts that fail to render.
-    fn draw_chart_placeholder(&self, t: &Transform, chart_type: &str) {
-        // Draw light blue background
-        self.ctx.set_fill_style_str("#e3f2fd");
-        self.ctx.fill_rect(
-            f64::from(t.x),
-            f64::from(t.y),
-            f64::from(t.width),
-            f64::from(t.height),
-        );
-
-        // Draw border
-        self.ctx.set_stroke_style_str("#90caf9");
-        self.ctx.set_line_width(1.0);
-        self.ctx.stroke_rect(
-            f64::from(t.x),
-            f64::from(t.y),
-            f64::from(t.width),
-            f64::from(t.height),
-        );
-
-        // Draw label
-        self.ctx.set_fill_style_str("#1976d2");
-        self.ctx.set_font("14px sans-serif");
-        let _ = self.ctx.fill_text(
-            &format!("Chart: {chart_type}"),
-            f64::from(t.x) + 10.0,
-            f64::from(t.y) + 25.0,
-        );
-
-        // Draw icon placeholder
-        self.ctx.set_fill_style_str("#bbdefb");
-        let icon_x = f64::from(t.x) + f64::from(t.width) / 2.0 - 20.0;
-        let icon_y = f64::from(t.y) + f64::from(t.height) / 2.0 - 10.0;
-        self.ctx.fill_rect(icon_x, icon_y, 40.0, 20.0);
-    }
-
-    /// Render a video element.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_video(&self, element: &Element, stream_id: &str) {
-        let t = &element.transform;
-
-        // Check if we have a cached frame for this stream
-        if let Some(frame) = self.video_frames.get(stream_id) {
-            // Scale and draw the video frame to fit the element bounds
-            self.draw_video_frame(frame, t);
-        } else {
-            // Draw placeholder if no frame available
-            self.draw_video_placeholder(t, stream_id);
-        }
-    }
-
-    /// Draw a video frame to the canvas, scaling to fit the element bounds.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn draw_video_frame(&self, frame: &VideoFrame, t: &Transform) {
-        // Create ImageData from the frame
-        let clamped = wasm_bindgen::Clamped(&frame.data[..]);
-
-        match ImageData::new_with_u8_clamped_array_and_sh(clamped, frame.width, frame.height) {
-            Ok(image_data) => {
-                // For now, draw directly (scaling would require a temporary canvas)
-                // If dimensions match, draw directly
-                if frame.width == t.width as u32 && frame.height == t.height as u32 {
-                    if let Err(e) =
-                        self.ctx
-                            .put_image_data(&image_data, f64::from(t.x), f64::from(t.y))
-                    {
-                        tracing::warn!("Failed to draw video frame: {:?}", e);
-                    }
-                } else {
-                    // Create a temporary canvas for scaling
-                    if let Some(window) = web_sys::window() {
-                        if let Some(document) = window.document() {
-                            if let Ok(temp_canvas) = document.create_element("canvas") {
-                                if let Ok(temp_canvas) = temp_canvas.dyn_into::<HtmlCanvasElement>()
-                                {
-                                    temp_canvas.set_width(frame.width);
-                                    temp_canvas.set_height(frame.height);
-
-                                    if let Ok(Some(temp_ctx)) = temp_canvas.get_context("2d") {
-                                        if let Ok(temp_ctx) =
-                                            temp_ctx.dyn_into::<CanvasRenderingContext2d>()
-                                        {
-                                            // Draw frame to temp canvas
-                                            let _ = temp_ctx.put_image_data(&image_data, 0.0, 0.0);
-
-                                            // Draw scaled to main canvas
-                                            let _ = self
-                                                .ctx
-                                                .draw_image_with_html_canvas_element_and_dw_and_dh(
-                                                    &temp_canvas,
-                                                    f64::from(t.x),
-                                                    f64::from(t.y),
-                                                    f64::from(t.width),
-                                                    f64::from(t.height),
-                                                );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create video ImageData: {:?}", e);
-            }
-        }
-    }
-
-    /// Draw a placeholder for video when no frame is available.
-    fn draw_video_placeholder(&self, t: &Transform, stream_id: &str) {
-        // Dark background
-        self.ctx.set_fill_style_str("#212121");
-        self.ctx.fill_rect(
-            f64::from(t.x),
-            f64::from(t.y),
-            f64::from(t.width),
-            f64::from(t.height),
-        );
-
-        // Center text
-        self.ctx.set_fill_style_str("#757575");
-        self.ctx.set_font("14px sans-serif");
-        self.ctx.set_text_align("center");
-        self.ctx.set_text_baseline("middle");
-
-        let center_x = f64::from(t.x) + f64::from(t.width) / 2.0;
-        let center_y = f64::from(t.y) + f64::from(t.height) / 2.0;
-
-        let _ = self
-            .ctx
-            .fill_text(&format!("Video: {stream_id}"), center_x, center_y - 10.0);
-        let _ = self.ctx.fill_text("No signal", center_x, center_y + 10.0);
-
-        // Reset text alignment
-        self.ctx.set_text_align("start");
-        self.ctx.set_text_baseline("alphabetic");
-    }
-
-    /// Update a video frame from JavaScript.
     /// The data should be RGBA bytes.
     #[wasm_bindgen(js_name = updateVideoFrame)]
     pub fn update_video_frame(
@@ -582,35 +687,45 @@ impl CanvasApp {
         height: u32,
         timestamp: f64,
     ) {
-        self.video_frames.insert(
-            stream_id.to_string(),
-            VideoFrame {
-                data: data.to_vec(),
-                width,
-                height,
-                timestamp,
-            },
-        );
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.video_frames.insert(
+                stream_id.to_string(),
+                VideoFrame {
+                    data: data.to_vec(),
+                    width,
+                    height,
+                    timestamp,
+                },
+            );
+        }
     }
 
     /// Remove a video stream from the cache.
     #[wasm_bindgen(js_name = removeVideoStream)]
     pub fn remove_video_stream(&mut self, stream_id: &str) {
-        self.video_frames.remove(stream_id);
+        if let Ok(mut state) = self.renderer_state.try_borrow_mut() {
+            state.video_frames.remove(stream_id);
+        }
     }
 
     /// Get the list of registered video stream IDs.
     #[wasm_bindgen(js_name = getVideoStreamIds)]
     #[must_use]
     pub fn get_video_stream_ids(&self) -> Vec<String> {
-        self.video_frames.keys().cloned().collect()
+        self.renderer_state
+            .try_borrow()
+            .map(|state| state.video_frames.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Check if a video stream has a cached frame.
     #[wasm_bindgen(js_name = hasVideoFrame)]
     #[must_use]
     pub fn has_video_frame(&self, stream_id: &str) -> bool {
-        self.video_frames.contains_key(stream_id)
+        self.renderer_state
+            .try_borrow()
+            .map(|state| state.video_frames.contains_key(stream_id))
+            .unwrap_or(false)
     }
 
     /// Get the timestamp of the last frame for a video stream.
@@ -618,42 +733,11 @@ impl CanvasApp {
     #[wasm_bindgen(js_name = getVideoFrameTimestamp)]
     #[must_use]
     pub fn get_video_frame_timestamp(&self, stream_id: &str) -> f64 {
-        self.video_frames
-            .get(stream_id)
-            .map_or(0.0, |f| f.timestamp)
-    }
-
-    /// Get the display color for an element.
-    fn get_element_color(element: &Element) -> String {
-        match &element.kind {
-            ElementKind::Chart { .. } => "#e3f2fd".to_string(), // Light blue
-            ElementKind::Image { .. } => "#f5f5f5".to_string(), // Light gray
-            ElementKind::Model3D { .. } => "#e8f5e9".to_string(), // Light green
-            ElementKind::Video { .. } => "#212121".to_string(), // Dark gray
-            ElementKind::OverlayLayer { opacity, .. } => format!("rgba(255, 255, 255, {opacity})"),
-            ElementKind::Text { color, .. } => color.clone(),
-            ElementKind::Group { .. } => "rgba(255, 253, 231, 0.5)".to_string(), // Transparent yellow
-        }
-    }
-
-    /// Get a label for the element type.
-    fn get_element_label(element: &Element) -> String {
-        match &element.kind {
-            ElementKind::Chart { chart_type, .. } => format!("Chart: {chart_type}"),
-            ElementKind::Image { .. } => "Image".to_string(),
-            ElementKind::Model3D { .. } => "3D Model".to_string(),
-            ElementKind::Video { stream_id, .. } => format!("Video: {stream_id}"),
-            ElementKind::OverlayLayer { children, .. } => format!("Overlay ({})", children.len()),
-            ElementKind::Text { content, .. } => {
-                let preview = if content.len() > 20 {
-                    format!("{}...", &content[..20])
-                } else {
-                    content.clone()
-                };
-                preview
-            }
-            ElementKind::Group { children } => format!("Group ({})", children.len()),
-        }
+        self.renderer_state
+            .try_borrow()
+            .ok()
+            .and_then(|state| state.video_frames.get(stream_id).map(|f| f.timestamp))
+            .unwrap_or(0.0)
     }
 }
 
@@ -809,6 +893,7 @@ pub fn create_video_element(
         is_live,
         mirror,
         crop: None,
+        media_config: None,
     })
     .with_transform(Transform {
         x,

@@ -201,7 +201,6 @@ impl HolographicRenderer {
         let red = (progress * 255.0) as u8;
         let green = 100_u8;
         let blue = ((1.0 - progress) * 255.0) as u8;
-        let alpha = 255_u8;
 
         // Fill the view area
         target.fill_rect(
@@ -209,45 +208,35 @@ impl HolographicRenderer {
             view.y_offset,
             view.width,
             view.height,
-            [red, green, blue, alpha],
+            [red, green, blue, 255],
         );
 
-        // Draw a border to show view boundaries
-        let border_color = [255, 255, 255, 128];
-        let border_width = 2;
-
-        // Top border
-        target.fill_rect(
+        // Draw border rectangle around the view
+        Self::draw_border(
+            target,
             view.x_offset,
             view.y_offset,
             view.width,
-            border_width,
-            border_color,
-        );
-        // Bottom border
-        target.fill_rect(
-            view.x_offset,
-            view.y_offset + view.height - border_width,
-            view.width,
-            border_width,
-            border_color,
-        );
-        // Left border
-        target.fill_rect(
-            view.x_offset,
-            view.y_offset,
-            border_width,
             view.height,
-            border_color,
         );
-        // Right border
-        target.fill_rect(
-            view.x_offset + view.width - border_width,
-            view.y_offset,
-            border_width,
-            view.height,
-            border_color,
-        );
+    }
+
+    /// Draw a border rectangle at the specified position.
+    fn draw_border(target: &mut QuiltRenderTarget, x: u32, y: u32, width: u32, height: u32) {
+        const BORDER_COLOR: [u8; 4] = [255, 255, 255, 128];
+        const BORDER_WIDTH: u32 = 2;
+
+        // Define borders as (x, y, w, h) tuples
+        let borders = [
+            (x, y, width, BORDER_WIDTH),                         // Top
+            (x, y + height - BORDER_WIDTH, width, BORDER_WIDTH), // Bottom
+            (x, y, BORDER_WIDTH, height),                        // Left
+            (x + width - BORDER_WIDTH, y, BORDER_WIDTH, height), // Right
+        ];
+
+        for (bx, by, bw, bh) in borders {
+            target.fill_rect(bx, by, bw, bh, BORDER_COLOR);
+        }
     }
 
     /// Get the expected quilt dimensions for the current configuration.

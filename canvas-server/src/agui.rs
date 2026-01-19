@@ -32,13 +32,15 @@ use axum::{
     },
     Json,
 };
-use canvas_core::{A2UITree, Scene};
+use canvas_core::A2UITree;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+
+use crate::sync::SyncState;
 
 /// AG-UI event types sent via SSE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,15 +112,15 @@ pub struct RenderA2UIResponse {
 pub struct AgUiState {
     /// Broadcast sender for AG-UI events.
     pub event_tx: broadcast::Sender<AgUiEvent>,
-    /// Reference to the scene (for POST /render).
-    pub scene: std::sync::Arc<std::sync::RwLock<Scene>>,
+    /// Reference to sync state for scene mutations.
+    pub sync: SyncState,
 }
 
 impl AgUiState {
     /// Create a new AG-UI state with the given scene.
-    pub fn new(scene: std::sync::Arc<std::sync::RwLock<Scene>>) -> Self {
+    pub fn new(sync: SyncState) -> Self {
         let (event_tx, _) = broadcast::channel(100);
-        Self { event_tx, scene }
+        Self { event_tx, sync }
     }
 
     /// Broadcast an AG-UI event to all connected clients.
@@ -144,27 +146,20 @@ impl AgUiState {
         );
         let result = request.tree.to_elements();
 
-        // Update the scene
-        {
-            let mut scene = match self.scene.write() {
-                Ok(s) => s,
-                Err(e) => {
-                    return RenderA2UIResponse {
-                        success: false,
-                        element_count: 0,
-                        warnings: vec![],
-                        error: Some(format!("Failed to lock scene: {e}")),
-                    }
-                }
-            };
-
+        if let Err(e) = self.sync.update_scene(&request.session_id, |scene| {
             if request.clear {
                 scene.clear();
             }
-
             for element in &result.elements {
                 scene.add_element(element.clone());
             }
+        }) {
+            return RenderA2UIResponse {
+                success: false,
+                element_count: 0,
+                warnings: vec![],
+                error: Some(e.to_string()),
+            };
         }
 
         // Broadcast the render event
@@ -301,8 +296,7 @@ mod tests {
 
     #[test]
     fn test_agui_state_render_a2ui() {
-        let scene = std::sync::Arc::new(std::sync::RwLock::new(Scene::new(800.0, 600.0)));
-        let state = AgUiState::new(scene.clone());
+        let state = AgUiState::new(SyncState::new());
 
         let tree = A2UITree::from_json(
             r#"{
@@ -332,14 +326,16 @@ mod tests {
         assert!(response.error.is_none());
 
         // Verify scene was updated
-        let scene = state.scene.read().expect("should lock");
+        let scene = state
+            .sync
+            .get_scene("test")
+            .expect("scene should exist after render");
         assert_eq!(scene.element_count(), 2);
     }
 
     #[test]
     fn test_agui_state_render_without_clear() {
-        let scene = std::sync::Arc::new(std::sync::RwLock::new(Scene::new(800.0, 600.0)));
-        let state = AgUiState::new(scene.clone());
+        let state = AgUiState::new(SyncState::new());
 
         // First render
         let tree1 = A2UITree::from_json(r#"{"root": { "component": "text", "content": "First" }}"#)
@@ -366,14 +362,13 @@ mod tests {
         assert_eq!(response.element_count, 1);
 
         // Scene should have both elements
-        let scene = state.scene.read().expect("should lock");
+        let scene = state.sync.get_scene("test").expect("scene should exist");
         assert_eq!(scene.element_count(), 2);
     }
 
     #[test]
     fn test_agui_state_render_with_clear() {
-        let scene = std::sync::Arc::new(std::sync::RwLock::new(Scene::new(800.0, 600.0)));
-        let state = AgUiState::new(scene.clone());
+        let state = AgUiState::new(SyncState::new());
 
         // First render
         let tree1 = A2UITree::from_json(r#"{"root": { "component": "text", "content": "First" }}"#)
@@ -400,14 +395,13 @@ mod tests {
         assert_eq!(response.element_count, 1);
 
         // Scene should only have the second element
-        let scene = state.scene.read().expect("should lock");
+        let scene = state.sync.get_scene("test").expect("scene should exist");
         assert_eq!(scene.element_count(), 1);
     }
 
     #[test]
     fn test_broadcast_event() {
-        let scene = std::sync::Arc::new(std::sync::RwLock::new(Scene::new(800.0, 600.0)));
-        let state = AgUiState::new(scene);
+        let state = AgUiState::new(SyncState::new());
 
         // Subscribe before broadcasting
         let mut rx = state.event_tx.subscribe();

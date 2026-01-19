@@ -305,19 +305,9 @@ impl A2UIConverter {
     }
 
     fn calculate_bounds(elements: &[Element]) -> (f32, f32) {
-        if elements.is_empty() {
-            return (0.0, 0.0);
-        }
-
-        let mut max_width = 0.0f32;
-        let mut max_height = 0.0f32;
-
-        for el in elements {
-            max_width = max_width.max(el.transform.width);
-            max_height = max_height.max(el.transform.height);
-        }
-
-        (max_width, max_height)
+        elements.iter().fold((0.0, 0.0), |(w, h), el| {
+            (w.max(el.transform.width), h.max(el.transform.height))
+        })
     }
 
     fn convert_text(
@@ -411,6 +401,7 @@ impl A2UIConverter {
             is_live: true,
             mirror,
             crop: None,
+            media_config: None,
         })
         .with_transform(Transform {
             x,

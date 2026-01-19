@@ -32,6 +32,10 @@ wgpu = { workspace = true, optional = true }
 bytemuck = { version = "1.21", features = ["derive"] }
 pollster = "0.4"
 
+# Windowing (for native targets)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+winit.workspace = true
+
 # WASM (optional)
 wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }

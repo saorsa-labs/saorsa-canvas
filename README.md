@@ -174,6 +174,9 @@ Communitas (P2P collaboration)
 
 ## Documentation
 
+- **[API.md](docs/API.md)** - Complete API reference (HTTP, MCP, WebSocket)
+- **[CONFIGURATION.md](docs/CONFIGURATION.md)** - Environment variables and settings
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Docker, Kubernetes, and production setup
 - **[VISION.md](docs/VISION.md)** - Full architectural vision and rationale
 - **[DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)** - Phased implementation for Claude Code
 - **[SPECS.md](docs/SPECS.md)** - Tracked standards and external references
