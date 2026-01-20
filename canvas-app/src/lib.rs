@@ -36,13 +36,12 @@ use canvas_core::{
     CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, SceneDocument, TouchEvent,
     TouchPhase, TouchPoint, Transform,
 };
-use canvas_renderer::{
-    chart::{parse_chart_config, render_chart_to_buffer},
-    BackendType, RenderBackend, RenderResult, Renderer, RendererConfig,
-};
+use canvas_renderer::{BackendType, RenderBackend, RenderResult, Renderer, RendererConfig};
 
-#[cfg(target_arch = "wasm32")]
-use canvas_renderer::backend::wgpu::WgpuBackend;
+// Chart rendering is not available in WASM - always use placeholder
+// The chart module uses plotters which doesn't support wasm32
+// WebGPU backend is not available in WASM builds (gpu feature disabled)
+
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
@@ -51,16 +50,6 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 pub fn init_wasm() {
     console_error_panic_hook::set_once();
     tracing::info!("Saorsa Canvas WASM initialized");
-}
-
-/// Cached rendered chart data.
-struct RenderedChart {
-    /// RGBA pixel data.
-    data: Vec<u8>,
-    /// Width in pixels.
-    width: u32,
-    /// Height in pixels.
-    height: u32,
 }
 
 /// Cached video frame data.
@@ -83,7 +72,6 @@ struct DomRendererState {
     width: u32,
     height: u32,
     background_color: String,
-    chart_cache: HashMap<ElementId, RenderedChart>,
     video_frames: HashMap<String, VideoFrame>,
 }
 
@@ -97,7 +85,6 @@ impl DomRendererState {
             width,
             height,
             background_color: "#ffffff".to_string(),
-            chart_cache: HashMap::new(),
             video_frames: HashMap::new(),
         }
     }
@@ -114,27 +101,12 @@ impl DomRendererState {
     }
 
     fn clear_dynamic_content(&mut self) {
-        self.chart_cache.clear();
         self.video_frames.clear();
     }
 }
 
 struct DomCanvasBackend {
     state: RendererHandle,
-}
-
-#[cfg(target_arch = "wasm32")]
-fn try_webgpu_backend(canvas: &HtmlCanvasElement) -> Option<Box<dyn RenderBackend>> {
-    match WgpuBackend::from_canvas(canvas.clone()) {
-        Ok(backend) => {
-            tracing::info!("WebGPU backend initialized");
-            Some(Box::new(backend))
-        }
-        Err(err) => {
-            tracing::warn!("WebGPU unavailable, falling back to Canvas2D: {}", err);
-            None
-        }
-    }
 }
 
 impl DomRendererState {
@@ -189,74 +161,11 @@ impl DomRendererState {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_chart(&mut self, element: &Element, chart_type: &str, data: &serde_json::Value) {
+    fn render_chart(&mut self, element: &Element, chart_type: &str, _data: &serde_json::Value) {
+        // Chart rendering is not available in WASM (plotters doesn't support wasm32)
+        // Always use placeholder rendering
         let t = &element.transform;
-        let width = t.width as u32;
-        let height = t.height as u32;
-
-        if let Some(cached) = self.chart_cache.get(&element.id) {
-            if cached.width == width && cached.height == height {
-                self.draw_rgba_buffer(&cached.data, t.x, t.y, cached.width, cached.height);
-                return;
-            }
-        }
-
-        match parse_chart_config(chart_type, data, width, height) {
-            Ok(config) => match render_chart_to_buffer(&config) {
-                Ok(pixel_buffer) => {
-                    let canvas_buffer = Self::rgb_to_rgba(&pixel_buffer);
-
-                    self.chart_cache.insert(
-                        element.id,
-                        RenderedChart {
-                            data: canvas_buffer.clone(),
-                            width,
-                            height,
-                        },
-                    );
-
-                    self.draw_rgba_buffer(&canvas_buffer, t.x, t.y, width, height);
-                }
-                Err(e) => {
-                    tracing::warn!("Chart render error: {}", e);
-                    self.draw_chart_placeholder(t, chart_type);
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Chart config error: {}", e);
-                self.draw_chart_placeholder(t, chart_type);
-            }
-        }
-    }
-
-    fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
-        let pixel_count = rgb.len() / 3;
-        let mut rgba = Vec::with_capacity(pixel_count * 4);
-
-        for i in 0..pixel_count {
-            rgba.push(rgb[i * 3]);
-            rgba.push(rgb[i * 3 + 1]);
-            rgba.push(rgb[i * 3 + 2]);
-            rgba.push(255);
-        }
-
-        rgba
-    }
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn draw_rgba_buffer(&self, data: &[u8], x: f32, y: f32, width: u32, height: u32) {
-        let clamped = wasm_bindgen::Clamped(data);
-        match ImageData::new_with_u8_clamped_array_and_sh(clamped, width, height) {
-            Ok(image_data) => {
-                if let Err(e) = self
-                    .ctx
-                    .put_image_data(&image_data, f64::from(x), f64::from(y))
-                {
-                    tracing::warn!("Failed to draw image data: {:?}", e);
-                }
-            }
-            Err(e) => tracing::warn!("Failed to create ImageData: {:?}", e),
-        }
+        self.draw_chart_placeholder(t, chart_type);
     }
 
     fn draw_chart_placeholder(&self, t: &Transform, chart_type: &str) {
@@ -469,14 +378,7 @@ impl CanvasApp {
 
         let renderer_state = Rc::new(RefCell::new(DomRendererState::new(canvas, ctx)));
 
-        #[cfg(target_arch = "wasm32")]
-        let mut backend: Box<dyn RenderBackend> = match try_webgpu_backend(&canvas) {
-            Some(webgpu) => webgpu,
-            None => Box::new(DomCanvasBackend {
-                state: Rc::clone(&renderer_state),
-            }),
-        };
-        #[cfg(not(target_arch = "wasm32"))]
+        // Use Canvas2D backend for WASM (WebGPU not available without gpu feature)
         let backend: Box<dyn RenderBackend> = Box::new(DomCanvasBackend {
             state: Rc::clone(&renderer_state),
         });

@@ -8,9 +8,11 @@ license.workspace = true
 description = "Custom minimal renderer for Saorsa Canvas built on wgpu. Provides GPU rendering with WebGL2/2D fallbacks."
 
 [features]
-default = ["gpu"]
+default = ["gpu", "charts", "images"]
 gpu = ["wgpu"]
 wasm = ["wasm-bindgen", "web-sys", "js-sys"]
+charts = ["plotters"]
+images = ["image"]
 
 [dependencies]
 # Core canvas types
@@ -41,11 +43,11 @@ wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
 
-# Charts
-plotters.workspace = true
+# Charts (optional, not available for WASM)
+plotters = { workspace = true, optional = true }
 
-# Image processing
-image.workspace = true
+# Image processing (optional, not available for WASM)
+image = { workspace = true, optional = true }
 
 # Base64 encoding for data URIs
 base64.workspace = true

@@ -20,12 +20,15 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod backend;
+#[cfg(feature = "charts")]
 pub mod chart;
 pub mod error;
 pub mod holographic;
+#[cfg(feature = "images")]
 pub mod image;
 pub mod quilt;
 pub mod spatial;
+#[cfg(feature = "images")]
 pub mod texture_cache;
 
 pub use backend::RenderBackend;
