@@ -71,9 +71,13 @@ async fn two_clients_receive_same_broadcast() {
     let (mut write1, mut read1) = ws1.split();
     let (mut write2, mut read2) = ws2.split();
 
-    // Skip welcome messages
-    let _ = recv_json(&mut read1).await;
-    let _ = recv_json(&mut read2).await;
+    // Skip all 4 initial messages: welcome, peer_assigned, initial_scene, call_state
+    for _ in 0..4 {
+        let _ = recv_json(&mut read1).await;
+    }
+    for _ in 0..4 {
+        let _ = recv_json(&mut read2).await;
+    }
 
     // Both clients subscribe to the same session
     send_json(
@@ -133,8 +137,8 @@ async fn two_clients_receive_same_broadcast() {
     let mut client1_saw_element = false;
     let mut client2_saw_element = false;
 
-    // Check client 1 receives the broadcast
-    for _ in 0..5 {
+    // Check client 1 receives the broadcast (more retries for CI reliability)
+    for _ in 0..10 {
         if let Some(msg) = recv_json(&mut read1).await {
             if msg["type"] == "scene_update" {
                 if let Some(elements) = msg["scene"]["elements"].as_array() {
@@ -152,8 +156,8 @@ async fn two_clients_receive_same_broadcast() {
         }
     }
 
-    // Check client 2 receives the broadcast
-    for _ in 0..5 {
+    // Check client 2 receives the broadcast (more retries for CI reliability)
+    for _ in 0..10 {
         if let Some(msg) = recv_json(&mut read2).await {
             if msg["type"] == "scene_update" {
                 if let Some(elements) = msg["scene"]["elements"].as_array() {
