@@ -178,7 +178,7 @@ async fn two_clients_receive_same_broadcast() {
 }
 
 #[tokio::test]
-#[ignore = "reqwest has system-configuration issues in test environment"]
+#[ignore = "Test requires investigation - MCP/WebSocket integration issue"]
 async fn mcp_endpoint_triggers_websocket_update() {
     let server = TestServer::start().await;
 

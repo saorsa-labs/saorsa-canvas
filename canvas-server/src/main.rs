@@ -26,7 +26,10 @@ use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use canvas_server::agui;
-use canvas_server::communitas::{self, ClientDescriptor, CommunitasMcpClient, RetryConfig};
+use canvas_server::communitas::{
+    self, spawn_network_retry_task, ClientDescriptor, CommunitasMcpClient, NetworkRetryConfig,
+    RetryConfig,
+};
 use canvas_server::health;
 use canvas_server::metrics;
 use canvas_server::routes;
@@ -101,7 +104,8 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // Initialize Prometheus metrics
-    let metrics_handle = metrics::init_metrics();
+    let metrics_handle = metrics::init_metrics()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Prometheus metrics: {}", e))?;
     tracing::info!("Prometheus metrics initialized");
 
     let port = std::env::var("CANVAS_PORT")
@@ -379,10 +383,19 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
             url
         );
     } else {
-        // Still spawn scene bridge for data sync, but keep legacy signaling
+        // Spawn scene bridge for data sync (even without networking)
         communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
+
+        // Spawn background retry task for persistent network recovery
+        let retry_config = NetworkRetryConfig::default();
+        let _retry_handle = spawn_network_retry_task(
+            client.clone(),
+            sync_state.clone(),
+            preferred_port,
+            retry_config,
+        );
         tracing::info!(
-            "Communitas MCP client connected at {} (legacy signaling still enabled due to network failure)",
+            "Communitas MCP client connected at {} (legacy signaling enabled, background retry active)",
             url
         );
     }

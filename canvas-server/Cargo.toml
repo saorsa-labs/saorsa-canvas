@@ -20,7 +20,7 @@ path = "src/main.rs"
 canvas-core = { path = "../canvas-core" }
 canvas-renderer = { path = "../canvas-renderer" }
 canvas-mcp = { path = "../canvas-mcp" }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 
 # Async runtime

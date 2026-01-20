@@ -99,11 +99,14 @@ impl RetryConfig {
     }
 
     /// Calculate delay for a given attempt number (0-indexed).
+    ///
+    /// Uses exponential backoff capped at `max_delay_ms`, with a deterministic
+    /// jitter of 12.5% added to spread out retry attempts.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
         let base_delay = self.initial_delay_ms as f64 * self.multiplier.powi(attempt as i32);
         let capped_delay = base_delay.min(self.max_delay_ms as f64) as u64;
-        // Add jitter: random value between 0 and 25% of delay
+        // Add deterministic jitter: 12.5% of capped delay (capped_delay / 8)
         let jitter = (capped_delay / 4).max(1);
         capped_delay.saturating_add(jitter / 2)
     }
@@ -225,6 +228,12 @@ impl CommunitasMcpClient {
     }
 
     /// Perform MCP initialize handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Json`] if request serialization fails.
+    /// Returns [`CommunitasError::Rpc`] if the server returns an RPC error.
     pub async fn initialize(&self) -> Result<InitializeResult, CommunitasError> {
         let params = InitializeParams {
             protocol_version: "2024-11-05".to_string(),
@@ -237,6 +246,11 @@ impl CommunitasMcpClient {
     }
 
     /// Authenticate using a delegate token issued by Communitas.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if authentication is rejected.
     pub async fn authenticate_with_token(&self, token: &str) -> Result<(), CommunitasError> {
         self.call_tool("authenticate_token", Some(json!({ "token": token })))
             .await?;
@@ -244,11 +258,21 @@ impl CommunitasMcpClient {
     }
 
     /// List available tools after initialization/authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the server returns an RPC error.
     pub async fn tools_list(&self) -> Result<ToolListResult, CommunitasError> {
         self.send_rpc("tools/list", None).await
     }
 
     /// Call an MCP tool with optional arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the tool invocation fails.
     pub async fn call_tool(
         &self,
         name: &str,
@@ -262,6 +286,12 @@ impl CommunitasMcpClient {
     }
 
     /// Fetch the canonical scene document for a session via Communitas.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the tool call fails.
+    /// Returns [`CommunitasError::UnexpectedResponse`] if the scene cannot be parsed.
     pub async fn fetch_scene(&self, session_id: &str) -> Result<SceneDocument, CommunitasError> {
         let response = self
             .call_tool(
@@ -273,6 +303,12 @@ impl CommunitasMcpClient {
     }
 
     /// Push the latest scene document upstream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the tool call fails.
+    /// Returns [`CommunitasError::UnexpectedResponse`] if success flag is missing.
     pub async fn push_scene(&self, scene: &SceneDocument) -> Result<(), CommunitasError> {
         let response = self
             .call_tool(
@@ -317,6 +353,12 @@ impl CommunitasMcpClient {
     }
 
     /// Start the Communitas networking stack (saorsa-gossip over ant-quic).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the tool call fails.
+    /// Returns [`CommunitasError::UnexpectedResponse`] if success flag is missing.
     pub async fn network_start(&self, preferred_port: Option<u16>) -> Result<(), CommunitasError> {
         let mut args = serde_json::Map::new();
         if let Some(port) = preferred_port {
@@ -331,6 +373,12 @@ impl CommunitasMcpClient {
     }
 
     /// Start a WebRTC call associated with an entity/channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the call cannot be started.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn start_voice_call(
         &self,
         entity_id: &str,
@@ -349,6 +397,12 @@ impl CommunitasMcpClient {
     }
 
     /// Join an existing WebRTC call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the call cannot be joined.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn join_call(&self, call_id: &str) -> Result<CallAcknowledgeResult, CommunitasError> {
         let response = self
             .call_tool("join_call", Some(json!({ "call_id": call_id })))
@@ -357,6 +411,12 @@ impl CommunitasMcpClient {
     }
 
     /// End/leave a call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the call cannot be ended.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn end_call(&self, call_id: &str) -> Result<CallAcknowledgeResult, CommunitasError> {
         let response = self
             .call_tool("end_call", Some(json!({ "call_id": call_id })))
@@ -365,6 +425,12 @@ impl CommunitasMcpClient {
     }
 
     /// Toggle mute state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the mute toggle fails.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn toggle_mute(
         &self,
         call_id: &str,
@@ -383,6 +449,12 @@ impl CommunitasMcpClient {
     }
 
     /// Toggle outbound video.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the video toggle fails.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn toggle_video(
         &self,
         call_id: &str,
@@ -401,6 +473,12 @@ impl CommunitasMcpClient {
     }
 
     /// Start or stop screen sharing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the screen share toggle fails.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn share_screen(
         &self,
         call_id: &str,
@@ -419,6 +497,12 @@ impl CommunitasMcpClient {
     }
 
     /// Fetch current call status snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the status cannot be fetched.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn get_call_status(
         &self,
         call_id: &str,
@@ -430,6 +514,12 @@ impl CommunitasMcpClient {
     }
 
     /// List current participants in a call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunitasError::Http`] if the network request fails.
+    /// Returns [`CommunitasError::Rpc`] if the participants cannot be fetched.
+    /// Returns [`CommunitasError::Json`] if response parsing fails.
     pub async fn get_call_participants(
         &self,
         call_id: &str,
@@ -739,17 +829,19 @@ pub struct BridgeHandle {
 impl BridgeHandle {
     /// Get the current connection state.
     ///
-    /// # Panics
-    ///
-    /// Panics if the state lock is poisoned.
+    /// Returns `ConnectionState::Disconnected` if the internal state lock is poisoned,
+    /// allowing the caller to handle this gracefully rather than panicking.
     #[must_use]
     pub fn state(&self) -> ConnectionState {
         self.state
             .read()
             .map(|guard| guard.clone())
-            .unwrap_or_else(|_| ConnectionState::Disconnected {
-                since: Instant::now(),
-                reason: "lock poisoned".into(),
+            .unwrap_or_else(|e| {
+                tracing::error!("BridgeHandle state lock poisoned: {}", e);
+                ConnectionState::Disconnected {
+                    since: Instant::now(),
+                    reason: "lock poisoned".into(),
+                }
             })
     }
 
@@ -982,6 +1074,167 @@ fn spawn_scene_pull(
     (handle, shutdown_tx)
 }
 
+/// Configuration for the persistent network retry task.
+#[derive(Debug, Clone)]
+pub struct NetworkRetryConfig {
+    /// Initial delay between retry attempts in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Maximum delay between retry attempts in milliseconds.
+    pub max_delay_ms: u64,
+    /// Multiplier for exponential backoff.
+    pub multiplier: f64,
+}
+
+impl Default for NetworkRetryConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay_ms: 30_000, // 30 seconds initial
+            max_delay_ms: 300_000,    // 5 minutes max
+            multiplier: 1.5,
+        }
+    }
+}
+
+impl NetworkRetryConfig {
+    /// Calculate delay for a given attempt number with jitter.
+    #[must_use]
+    pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
+        let base = self.initial_delay_ms as f64 * self.multiplier.powi(attempt as i32);
+        let capped = base.min(self.max_delay_ms as f64);
+        // Add 12.5% jitter to avoid thundering herd
+        let jitter = (capped / 8.0) as u64;
+        capped as u64 + jitter / 2
+    }
+}
+
+/// Handle to a running network retry task.
+pub struct NetworkRetryHandle {
+    handle: JoinHandle<()>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    connected: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NetworkRetryHandle {
+    /// Check if networking has successfully connected.
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Gracefully shutdown the retry task.
+    pub fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
+    }
+}
+
+/// Spawn a background task that persistently retries `network_start` until it succeeds.
+///
+/// This task will:
+/// - Retry with exponential backoff (30s initial, up to 5 minutes)
+/// - Call `sync_state.set_communitas_client()` when networking succeeds
+/// - Spawn the scene bridge once connected
+/// - Log all state transitions
+/// - Update Prometheus metrics
+///
+/// # Arguments
+///
+/// * `client` - The Communitas MCP client (already initialized and authenticated)
+/// * `sync_state` - The sync state to update when networking succeeds
+/// * `preferred_port` - Optional preferred port for networking
+/// * `config` - Retry configuration (defaults to 30s initial, 5m max)
+pub fn spawn_network_retry_task(
+    client: CommunitasMcpClient,
+    sync_state: SyncState,
+    preferred_port: Option<u16>,
+    config: NetworkRetryConfig,
+) -> NetworkRetryHandle {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let connected_clone = Arc::clone(&connected);
+
+    let handle = tokio::spawn(async move {
+        let mut attempt: u32 = 0;
+
+        crate::metrics::set_communitas_network_state("disconnected");
+
+        loop {
+            // Check for shutdown signal before each attempt
+            if shutdown_rx.try_recv().is_ok() {
+                tracing::info!("Network retry task received shutdown signal");
+                break;
+            }
+
+            // Wait before retry (exponential backoff)
+            let delay = config.delay_for_attempt(attempt);
+            tracing::info!(
+                attempt = attempt + 1,
+                delay_ms = delay,
+                "Scheduling Communitas network_start retry"
+            );
+            crate::metrics::set_communitas_network_state("retrying");
+
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Network retry task received shutdown signal during wait");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(delay)) => {}
+            }
+
+            // Attempt network_start
+            match client.network_start(preferred_port).await {
+                Ok(()) => {
+                    tracing::info!(
+                        attempt = attempt + 1,
+                        "Communitas network_start succeeded after retry"
+                    );
+                    crate::metrics::record_communitas_retry("success");
+                    crate::metrics::set_communitas_network_state("connected");
+
+                    // Install client in sync state to disable legacy signaling
+                    sync_state.set_communitas_client(client.clone());
+
+                    // Spawn scene bridge for bidirectional sync
+                    spawn_scene_bridge(sync_state.clone(), client.clone());
+
+                    connected_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("Communitas networking enabled, legacy signaling disabled");
+                    break;
+                }
+                Err(err) => {
+                    crate::metrics::record_communitas_retry("failure");
+
+                    if !err.is_retryable() {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            error = %err,
+                            "Communitas network_start failed with non-retryable error, stopping retries"
+                        );
+                        crate::metrics::set_communitas_network_state("disconnected");
+                        break;
+                    }
+
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %err,
+                        "Communitas network_start failed, will retry"
+                    );
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        }
+    });
+
+    NetworkRetryHandle {
+        handle,
+        shutdown_tx: Some(shutdown_tx),
+        connected,
+    }
+}
+
 /// Spawn a full bidirectional Communitas bridge with push and pull.
 ///
 /// This creates both:
@@ -1050,6 +1303,71 @@ mod tests {
         assert_eq!(config.max_attempts, 5);
         assert_eq!(config.initial_delay_ms, 100);
         assert_eq!(config.max_delay_ms, 10_000);
+    }
+
+    #[test]
+    fn test_retry_config_new() {
+        let config = RetryConfig::new(3, 200, 5000, 1.5);
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.initial_delay_ms, 200);
+        assert_eq!(config.max_delay_ms, 5000);
+        assert!((config.multiplier - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_delay_for_attempt_exponential_backoff() {
+        let config = RetryConfig::new(5, 100, 10_000, 2.0);
+
+        // attempt 0: base=100, capped=100, jitter=max(100/4,1)=25, result=100+12=112
+        assert_eq!(config.delay_for_attempt(0), 112);
+
+        // attempt 1: base=200, capped=200, jitter=50, result=200+25=225
+        assert_eq!(config.delay_for_attempt(1), 225);
+
+        // attempt 2: base=400, capped=400, jitter=100, result=400+50=450
+        assert_eq!(config.delay_for_attempt(2), 450);
+
+        // attempt 3: base=800, capped=800, jitter=200, result=800+100=900
+        assert_eq!(config.delay_for_attempt(3), 900);
+    }
+
+    #[test]
+    fn test_delay_for_attempt_caps_at_max() {
+        let config = RetryConfig::new(10, 1000, 3000, 2.0);
+
+        // attempt 0: base=1000, capped=1000, jitter=250, result=1000+125=1125
+        assert_eq!(config.delay_for_attempt(0), 1125);
+
+        // attempt 1: base=2000, capped=2000, jitter=500, result=2000+250=2250
+        assert_eq!(config.delay_for_attempt(1), 2250);
+
+        // attempt 2: base=4000, capped=3000 (max), jitter=750, result=3000+375=3375
+        assert_eq!(config.delay_for_attempt(2), 3375);
+
+        // attempt 3: still capped at 3000 + jitter
+        assert_eq!(config.delay_for_attempt(3), 3375);
+    }
+
+    #[test]
+    fn test_delay_for_attempt_minimum_jitter() {
+        // Very small initial delay to test jitter minimum of 1
+        let config = RetryConfig::new(3, 1, 1000, 2.0);
+
+        // attempt 0: base=1, capped=1, jitter=max(1/4,1)=1, result=1+0=1
+        // Note: jitter/2 = 0 when jitter=1, but .max(1) ensures jitter >= 1
+        let result = config.delay_for_attempt(0);
+        // base=1, jitter=(1/4).max(1)=1, result=1+(1/2)=1+0=1
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_delay_for_attempt_large_attempts() {
+        let config = RetryConfig::new(20, 100, 10_000, 2.0);
+
+        // Very large attempt number should be capped at max_delay + jitter
+        let result = config.delay_for_attempt(15);
+        // capped at 10000, jitter=2500, result=10000+1250=11250
+        assert_eq!(result, 11250);
     }
 
     #[test]
@@ -1124,10 +1442,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn initialize_success() {
         let server = MockServer::start().await;
 
@@ -1154,10 +1468,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn call_tool_propagates_error() {
         let server = MockServer::start().await;
 
@@ -1186,10 +1496,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn fetch_scene_parses_scene_document() {
         let server = MockServer::start().await;
         let scene = sample_scene();
@@ -1222,10 +1528,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn authenticate_with_token_sends_request() {
         let server = MockServer::start().await;
 
@@ -1249,12 +1551,20 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn bridge_pushes_local_updates() {
         let server = MockServer::start().await;
+
+        // Set up mock to respond to canvas_update_scene requests
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(body_string_contains("canvas_update_scene"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "success": true }
+            })))
+            .mount(&server)
+            .await;
 
         let client = client_with_mock(&server).await;
         let sync = SyncState::new();
@@ -1272,10 +1582,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "wiremock/reqwest system-configuration issue on macOS"
-    )]
     async fn bridge_ignores_remote_events() {
         let server = MockServer::start().await;
         let client = client_with_mock(&server).await;

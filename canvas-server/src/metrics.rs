@@ -3,7 +3,7 @@
 //! Provides metrics collection and a Prometheus-compatible `/metrics` endpoint.
 
 use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
 
 // Metric names as constants for consistency
 const HTTP_REQUESTS_TOTAL: &str = "canvas_http_requests_total";
@@ -15,16 +15,17 @@ const MCP_TOOL_CALLS_TOTAL: &str = "canvas_mcp_tool_calls_total";
 const SIGNALING_MESSAGES_TOTAL: &str = "canvas_signaling_messages_total";
 const VALIDATION_FAILURES_TOTAL: &str = "canvas_validation_failures_total";
 const RATE_LIMITED_TOTAL: &str = "canvas_rate_limited_total";
+const COMMUNITAS_NETWORK_STATE: &str = "canvas_communitas_network_state";
+const COMMUNITAS_RETRY_ATTEMPTS: &str = "canvas_communitas_retry_attempts_total";
 
 /// Initialize metrics and return the Prometheus handle.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the Prometheus recorder cannot be installed.
-pub fn init_metrics() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("Failed to install Prometheus recorder")
+/// Returns an error if the Prometheus recorder cannot be installed
+/// (e.g., if another recorder is already installed).
+pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
+    PrometheusBuilder::new().install_recorder()
 }
 
 /// Record an HTTP request.
@@ -136,6 +137,33 @@ pub fn record_rate_limited(source: &str) {
     counter!(
         RATE_LIMITED_TOTAL,
         "source" => source.to_string()
+    )
+    .increment(1);
+}
+
+/// Update Communitas network connection state.
+///
+/// # Arguments
+///
+/// * `state` - Connection state: "connected", "disconnected", "retrying"
+pub fn set_communitas_network_state(state: &str) {
+    // Use gauge with different labels for each state
+    // Reset all states to 0, then set current to 1
+    gauge!(COMMUNITAS_NETWORK_STATE, "state" => "connected").set(0.0);
+    gauge!(COMMUNITAS_NETWORK_STATE, "state" => "disconnected").set(0.0);
+    gauge!(COMMUNITAS_NETWORK_STATE, "state" => "retrying").set(0.0);
+    gauge!(COMMUNITAS_NETWORK_STATE, "state" => state.to_string()).set(1.0);
+}
+
+/// Record a Communitas network retry attempt.
+///
+/// # Arguments
+///
+/// * `outcome` - "success" or "failure"
+pub fn record_communitas_retry(outcome: &str) {
+    counter!(
+        COMMUNITAS_RETRY_ATTEMPTS,
+        "outcome" => outcome.to_string()
     )
     .increment(1);
 }
