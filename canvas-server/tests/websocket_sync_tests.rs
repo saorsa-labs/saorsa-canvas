@@ -326,7 +326,7 @@ fn test_transform_format() {
         "y": 200.5,
         "width": 300.0,
         "height": 150.0,
-        "rotation": 0.785398,
+        "rotation": 0.75,
         "z_index": 5
     });
 

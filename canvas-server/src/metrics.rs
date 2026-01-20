@@ -176,7 +176,9 @@ mod tests {
 
     #[test]
     fn test_metrics_module_exists() {
-        // Verify the metrics module compiles correctly
-        assert!(true);
+        // Verify the metrics module compiles correctly by calling a function
+        // Note: these don't panic even without a recorder
+        super::inc_ws_connections();
+        super::dec_ws_connections();
     }
 }

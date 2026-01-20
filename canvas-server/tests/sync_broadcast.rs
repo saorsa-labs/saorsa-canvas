@@ -207,7 +207,7 @@ async fn mcp_endpoint_triggers_websocket_update() {
     // Make an MCP request to add an element via HTTP
     let client = reqwest::Client::new();
     let mcp_response = client
-        .post(&server.mcp_url())
+        .post(server.mcp_url())
         .json(&json!({
             "jsonrpc": "2.0",
             "method": "tools/call",
@@ -305,7 +305,7 @@ async fn concurrent_updates_from_multiple_clients() {
             }),
         )
         .await
-        .expect(&format!("Client {} failed to subscribe", i + 1));
+        .unwrap_or_else(|_| panic!("Client {} failed to subscribe", i + 1));
     }
 
     // Skip initial scenes
