@@ -1097,13 +1097,17 @@ impl Default for NetworkRetryConfig {
 
 impl NetworkRetryConfig {
     /// Calculate delay for a given attempt number with jitter.
+    ///
+    /// Uses exponential backoff capped at `max_delay_ms`, with a deterministic
+    /// jitter of 12.5% added to spread out retry attempts.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
         let base = self.initial_delay_ms as f64 * self.multiplier.powi(attempt as i32);
-        let capped = base.min(self.max_delay_ms as f64);
-        // Add 12.5% jitter to avoid thundering herd
-        let jitter = (capped / 8.0) as u64;
-        capped as u64 + jitter / 2
+        let capped = base.min(self.max_delay_ms as f64) as u64;
+        // Add deterministic jitter: 12.5% of capped delay (capped / 8)
+        // Using (capped / 4).max(1) / 2 to match RetryConfig's formula
+        let jitter = (capped / 4).max(1);
+        capped.saturating_add(jitter / 2)
     }
 }
 

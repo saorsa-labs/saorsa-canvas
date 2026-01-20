@@ -28,7 +28,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use canvas_server::agui;
 use canvas_server::communitas::{
     self, spawn_network_retry_task, ClientDescriptor, CommunitasMcpClient, NetworkRetryConfig,
-    RetryConfig,
+    NetworkRetryHandle, RetryConfig,
 };
 use canvas_server::health;
 use canvas_server::metrics;
@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create sync state for WebSocket scene synchronization
     let sync_state = SyncState::new();
-    let communitas_client = init_communitas_client(&sync_state).await;
+    let (communitas_client, _network_retry_handle) = init_communitas_client(&sync_state).await;
 
     // Create MCP server with change notification callback
     let scene_tx = sync_state.sender();
@@ -271,11 +271,16 @@ async fn sync_websocket_handler(
 }
 
 /// Initialize Communitas MCP client for upstream scene synchronization.
+///
+/// Returns a tuple of (client, retry_handle). The retry_handle is Some when
+/// initial networking failed and a background retry task was spawned.
 #[tracing::instrument(name = "init_communitas", skip(sync_state))]
-async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpClient> {
+async fn init_communitas_client(
+    sync_state: &SyncState,
+) -> (Option<CommunitasMcpClient>, Option<NetworkRetryHandle>) {
     let url = match std::env::var("COMMUNITAS_MCP_URL") {
         Ok(url) => url,
-        Err(_) => return None,
+        Err(_) => return (None, None),
     };
 
     let descriptor = ClientDescriptor {
@@ -287,19 +292,19 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
         Ok(client) => client,
         Err(err) => {
             tracing::error!("Failed to configure Communitas MCP client: {}", err);
-            return None;
+            return (None, None);
         }
     };
 
     if let Err(err) = client.initialize().await {
         tracing::error!("Communitas MCP initialize failed: {}", err);
-        return None;
+        return (None, None);
     }
 
     if let Ok(token) = std::env::var("COMMUNITAS_MCP_TOKEN") {
         if let Err(err) = client.authenticate_with_token(token.trim()).await {
             tracing::error!("Communitas delegate authentication failed: {}", err);
-            return None;
+            return (None, None);
         }
     }
 
@@ -382,13 +387,14 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
             "Communitas MCP client connected at {} (legacy signaling disabled)",
             url
         );
+        (Some(client), None)
     } else {
         // Spawn scene bridge for data sync (even without networking)
         communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
 
         // Spawn background retry task for persistent network recovery
         let retry_config = NetworkRetryConfig::default();
-        let _retry_handle = spawn_network_retry_task(
+        let retry_handle = spawn_network_retry_task(
             client.clone(),
             sync_state.clone(),
             preferred_port,
@@ -398,7 +404,6 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
             "Communitas MCP client connected at {} (legacy signaling enabled, background retry active)",
             url
         );
+        (Some(client), Some(retry_handle))
     }
-
-    Some(client)
 }

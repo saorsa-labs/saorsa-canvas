@@ -178,7 +178,6 @@ async fn two_clients_receive_same_broadcast() {
 }
 
 #[tokio::test]
-#[ignore = "Test requires investigation - MCP/WebSocket integration issue"]
 async fn mcp_endpoint_triggers_websocket_update() {
     let server = TestServer::start().await;
 
@@ -189,8 +188,10 @@ async fn mcp_endpoint_triggers_websocket_update() {
 
     let (mut write, mut read) = ws.split();
 
-    // Skip welcome
-    let _ = recv_json(&mut read).await;
+    // Skip all 4 initial messages: welcome, peer_assigned, initial_scene, call_state
+    for _ in 0..4 {
+        let _ = recv_json(&mut read).await;
+    }
 
     // Subscribe to default session
     send_json(
@@ -203,9 +204,6 @@ async fn mcp_endpoint_triggers_websocket_update() {
     .await
     .unwrap();
 
-    // Skip initial scene
-    let _ = recv_json(&mut read).await;
-
     // Make an MCP request to add an element via HTTP
     let client = reqwest::Client::new();
     let mcp_response = client
@@ -217,12 +215,17 @@ async fn mcp_endpoint_triggers_websocket_update() {
                 "name": "canvas_render",
                 "arguments": {
                     "session_id": "default",
-                    "element_type": "text",
-                    "content": "MCP Added Element",
-                    "x": 50.0,
-                    "y": 50.0,
-                    "font_size": 16.0,
-                    "color": "#0000ff"
+                    "content": {
+                        "type": "Text",
+                        "data": {
+                            "content": "MCP Added Element",
+                            "font_size": 16.0
+                        }
+                    },
+                    "position": {
+                        "x": 50.0,
+                        "y": 50.0
+                    }
                 }
             },
             "id": "mcp-test-1"
@@ -231,7 +234,17 @@ async fn mcp_endpoint_triggers_websocket_update() {
         .await
         .expect("MCP request failed");
 
-    assert!(mcp_response.status().is_success());
+    let mcp_body: serde_json::Value = mcp_response
+        .json()
+        .await
+        .expect("Failed to parse MCP response");
+
+    // Check MCP response indicates success
+    assert!(
+        mcp_body.get("result").is_some(),
+        "MCP request should succeed: {:?}",
+        mcp_body
+    );
 
     // WebSocket client should receive a scene_update with the new element
     let mut mcp_element_found = false;
