@@ -264,7 +264,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn test_get_scene_uses_communitas_when_available() {
         let server = MockServer::start().await;
         let document = SceneDocument {

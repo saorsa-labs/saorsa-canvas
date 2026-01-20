@@ -100,7 +100,7 @@ impl RetryConfig {
 
     /// Calculate delay for a given attempt number (0-indexed).
     #[must_use]
-    fn delay_for_attempt(&self, attempt: u32) -> u64 {
+    pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
         let base_delay = self.initial_delay_ms as f64 * self.multiplier.powi(attempt as i32);
         let capped_delay = base_delay.min(self.max_delay_ms as f64) as u64;
         // Add jitter: random value between 0 and 25% of delay
@@ -284,11 +284,16 @@ impl CommunitasMcpClient {
             )
             .await?;
 
+        Self::require_success_flag(&response, "push_scene")
+    }
+
+    /// Check that a response contains `"success": true`, returning an error otherwise.
+    fn require_success_flag(response: &Value, operation: &str) -> Result<(), CommunitasError> {
         if response.get("success").and_then(Value::as_bool) == Some(true) {
             Ok(())
         } else {
             Err(CommunitasError::UnexpectedResponse(format!(
-                "missing success flag in response: {response}"
+                "{operation} missing success flag: {response}"
             )))
         }
     }
@@ -322,13 +327,7 @@ impl CommunitasMcpClient {
             .call_tool("network_start", Some(Value::Object(args)))
             .await?;
 
-        if response.get("success").and_then(Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            Err(CommunitasError::UnexpectedResponse(format!(
-                "network_start missing success flag: {response}"
-            )))
-        }
+        Self::require_success_flag(&response, "network_start")
     }
 
     /// Start a WebRTC call associated with an entity/channel.
@@ -1125,7 +1124,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn initialize_success() {
         let server = MockServer::start().await;
 
@@ -1152,7 +1154,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn call_tool_propagates_error() {
         let server = MockServer::start().await;
 
@@ -1181,7 +1186,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn fetch_scene_parses_scene_document() {
         let server = MockServer::start().await;
         let scene = sample_scene();
@@ -1214,7 +1222,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn authenticate_with_token_sends_request() {
         let server = MockServer::start().await;
 
@@ -1238,7 +1249,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn bridge_pushes_local_updates() {
         let server = MockServer::start().await;
 
@@ -1258,7 +1272,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "wiremock/reqwest system-configuration issue on macOS"
+    )]
     async fn bridge_ignores_remote_events() {
         let server = MockServer::start().await;
         let client = client_with_mock(&server).await;

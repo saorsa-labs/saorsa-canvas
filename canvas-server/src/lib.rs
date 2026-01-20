@@ -15,7 +15,7 @@ pub mod routes;
 pub mod sync;
 pub mod validation;
 
-pub use communitas::CommunitasMcpClient;
+pub use communitas::{CommunitasMcpClient, RetryConfig};
 pub use sync::SyncState;
 
 /// Shared application state.

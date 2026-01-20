@@ -338,6 +338,9 @@ pub enum ServerMessage {
         conflict_count: usize,
         /// Event timestamp.
         timestamp: u64,
+        /// Details of failed operations (up to 10).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        failed_operations: Vec<FailedOperationInfo>,
     },
     /// Communitas call state update for this session.
     CallState {
@@ -454,6 +457,45 @@ impl QueuedOperation {
             Self::Remove { .. } => "remove",
         }
     }
+
+    /// Get the element ID affected by this operation (if any).
+    #[must_use]
+    pub fn element_id(&self) -> Option<&str> {
+        match self {
+            Self::Add { element, .. } => Some(&element.id),
+            Self::Update { id, .. } | Self::Remove { id, .. } => Some(id),
+        }
+    }
+}
+
+/// Information about a failed sync operation sent to clients.
+///
+/// This struct provides minimal but useful details about operations
+/// that failed during queue processing, enabling client-side reconciliation.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedOperationInfo {
+    /// Type of operation that failed (add, update, remove).
+    pub operation: String,
+    /// Element ID involved in the failed operation, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    /// Human-readable error message.
+    pub error: String,
+}
+
+impl FailedOperationInfo {
+    /// Maximum number of failed operations to include in a sync result.
+    pub const MAX_FAILURES_IN_RESPONSE: usize = 10;
+
+    /// Create from a failed operation and its error message.
+    #[must_use]
+    pub fn from_failed_op(op: &QueuedOperation, error: &str) -> Self {
+        Self {
+            operation: op.operation_type().to_string(),
+            element_id: op.element_id().map(String::from),
+            error: error.to_string(),
+        }
+    }
 }
 
 /// Result of processing queued offline operations.
@@ -471,12 +513,23 @@ pub struct ProcessQueueResult {
 
 impl ProcessQueueResult {
     /// Convert to a ServerMessage for broadcasting.
+    ///
+    /// Failed operations are included up to a maximum of 10 to avoid
+    /// excessively large payloads while still providing useful debug info.
     #[must_use]
     pub fn into_server_message(self) -> ServerMessage {
+        let failed_operations: Vec<FailedOperationInfo> = self
+            .failed_ops
+            .iter()
+            .take(FailedOperationInfo::MAX_FAILURES_IN_RESPONSE)
+            .map(|(op, err)| FailedOperationInfo::from_failed_op(op, err))
+            .collect();
+
         ServerMessage::SyncResult {
             synced_count: self.processed_count,
             conflict_count: self.failed_count,
             timestamp: self.timestamp,
+            failed_operations,
         }
     }
 }
@@ -582,17 +635,34 @@ impl SyncState {
 
     /// Install a Communitas MCP client for upstream media coordination.
     pub fn set_communitas_client(&self, client: CommunitasMcpClient) {
-        if let Ok(mut guard) = self.communitas.write() {
-            *guard = Some(client);
+        match self.communitas.write() {
+            Ok(mut guard) => {
+                *guard = Some(client);
+                tracing::info!("Communitas MCP client installed");
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to set Communitas client: lock poisoned ({}). \
+                     Legacy signaling will remain enabled.",
+                    e
+                );
+            }
         }
     }
 
     /// Returns true when a Communitas MCP client is configured.
     pub fn communitas_enabled(&self) -> bool {
-        self.communitas
-            .read()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
+        match self.communitas.read() {
+            Ok(guard) => guard.is_some(),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to check communitas_enabled: lock poisoned ({}). \
+                     Assuming disabled for safety.",
+                    e
+                );
+                false
+            }
+        }
     }
 
     /// Returns true if legacy WebRTC signaling should remain available.
@@ -601,21 +671,37 @@ impl SyncState {
     }
 
     fn communitas_client(&self) -> Option<CommunitasMcpClient> {
-        self.communitas.read().ok().and_then(|guard| guard.clone())
+        match self.communitas.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::error!("Failed to get Communitas client: lock poisoned ({})", e);
+                None
+            }
+        }
     }
 
     fn call_snapshot(&self, session_id: &str) -> CallSnapshot {
-        if let Ok(calls) = self.active_calls.read() {
-            if let Some(call) = calls.get(session_id) {
-                let mut participants: Vec<_> = call.participants.iter().cloned().collect();
-                participants.sort();
-                return CallSnapshot {
-                    call_id: call.call_id.clone(),
-                    participants,
-                };
+        match self.active_calls.read() {
+            Ok(calls) => {
+                if let Some(call) = calls.get(session_id) {
+                    let mut participants: Vec<_> = call.participants.iter().cloned().collect();
+                    participants.sort();
+                    return CallSnapshot {
+                        call_id: call.call_id.clone(),
+                        participants,
+                    };
+                }
+                CallSnapshot::default()
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    "Failed to get call snapshot: lock poisoned ({})",
+                    e
+                );
+                CallSnapshot::default()
             }
         }
-        CallSnapshot::default()
     }
 
     fn broadcast_call_state(&self, session_id: &str) {
@@ -707,14 +793,25 @@ impl SyncState {
     }
 
     fn set_call_metadata(&self, session_id: &str, call_id: String, entity_id: String) {
-        let mut updated = false;
-        if let Ok(mut calls) = self.active_calls.write() {
-            if let Some(entry) = calls.get_mut(session_id) {
-                entry.call_id = Some(call_id);
-                entry.entity_id = entity_id;
-                updated = true;
+        let updated = match self.active_calls.write() {
+            Ok(mut calls) => {
+                if let Some(entry) = calls.get_mut(session_id) {
+                    entry.call_id = Some(call_id);
+                    entry.entity_id = entity_id;
+                    true
+                } else {
+                    false
+                }
             }
-        }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    "Failed to set call metadata: lock poisoned ({})",
+                    e
+                );
+                false
+            }
+        };
         if updated {
             self.broadcast_call_state(session_id);
         }
@@ -999,10 +1096,15 @@ impl SyncState {
 
     /// Clear the Communitas client reference, re-enabling legacy signaling.
     pub fn clear_communitas_client(&self) {
-        if let Ok(mut guard) = self.communitas.write() {
-            *guard = None;
+        match self.communitas.write() {
+            Ok(mut guard) => {
+                *guard = None;
+                tracing::info!("Cleared Communitas client, legacy signaling re-enabled");
+            }
+            Err(e) => {
+                tracing::error!("Failed to clear Communitas client: lock poisoned ({})", e);
+            }
         }
-        tracing::info!("Cleared Communitas client, legacy signaling re-enabled");
     }
 
     /// Register a peer connection.
@@ -1014,15 +1116,26 @@ impl SyncState {
         session_id: &str,
     ) -> mpsc::UnboundedReceiver<ServerMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        if let Ok(mut peers) = self.peers.write() {
-            peers.insert(
-                peer_id.to_string(),
-                PeerInfo {
-                    session_id: session_id.to_string(),
-                    sender: tx,
-                },
-            );
-            tracing::info!("Registered peer {} in session {}", peer_id, session_id);
+        match self.peers.write() {
+            Ok(mut peers) => {
+                peers.insert(
+                    peer_id.to_string(),
+                    PeerInfo {
+                        session_id: session_id.to_string(),
+                        sender: tx,
+                    },
+                );
+                tracing::info!("Registered peer {} in session {}", peer_id, session_id);
+            }
+            Err(e) => {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    session_id = %session_id,
+                    "Failed to register peer: lock poisoned ({}). \
+                     Peer will not receive messages.",
+                    e
+                );
+            }
         }
         rx
     }
@@ -1030,13 +1143,23 @@ impl SyncState {
     /// Update a peer's session.
     pub fn update_peer_session(&self, peer_id: &str, session_id: &str) {
         let mut previous: Option<String> = None;
-        if let Ok(mut peers) = self.peers.write() {
-            if let Some(info) = peers.get_mut(peer_id) {
-                if info.session_id != session_id {
-                    previous = Some(info.session_id.clone());
-                    info.session_id = session_id.to_string();
-                    tracing::debug!("Updated peer {} to session {}", peer_id, session_id);
+        match self.peers.write() {
+            Ok(mut peers) => {
+                if let Some(info) = peers.get_mut(peer_id) {
+                    if info.session_id != session_id {
+                        previous = Some(info.session_id.clone());
+                        info.session_id = session_id.to_string();
+                        tracing::debug!("Updated peer {} to session {}", peer_id, session_id);
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    session_id = %session_id,
+                    "Failed to update peer session: lock poisoned ({})",
+                    e
+                );
             }
         }
         if let Some(old_session) = previous {
@@ -1046,10 +1169,16 @@ impl SyncState {
 
     /// Unregister a peer connection.
     pub fn unregister_peer(&self, peer_id: &str) {
-        let session = if let Ok(mut peers) = self.peers.write() {
-            peers.remove(peer_id).map(|info| info.session_id)
-        } else {
-            None
+        let session = match self.peers.write() {
+            Ok(mut peers) => peers.remove(peer_id).map(|info| info.session_id),
+            Err(e) => {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    "Failed to unregister peer: lock poisoned ({})",
+                    e
+                );
+                None
+            }
         };
         if let Some(session_id) = session {
             tracing::info!("Unregistered peer {} from session {}", peer_id, session_id);
@@ -1063,34 +1192,57 @@ impl SyncState {
     ///
     /// Returns true if the peer exists and the message was queued.
     pub fn send_to_peer(&self, peer_id: &str, message: ServerMessage) -> bool {
-        if let Ok(peers) = self.peers.read() {
-            if let Some(info) = peers.get(peer_id) {
-                return info.sender.send(message).is_ok();
+        match self.peers.read() {
+            Ok(peers) => {
+                if let Some(info) = peers.get(peer_id) {
+                    return info.sender.send(message).is_ok();
+                }
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    "Failed to send to peer: lock poisoned ({})",
+                    e
+                );
+                false
             }
         }
-        false
     }
 
     /// Get the session ID for a peer.
     #[must_use]
     pub fn get_peer_session(&self, peer_id: &str) -> Option<String> {
-        if let Ok(peers) = self.peers.read() {
-            peers.get(peer_id).map(|info| info.session_id.clone())
-        } else {
-            None
+        match self.peers.read() {
+            Ok(peers) => peers.get(peer_id).map(|info| info.session_id.clone()),
+            Err(e) => {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    "Failed to get peer session: lock poisoned ({})",
+                    e
+                );
+                None
+            }
         }
     }
 
     /// Check if a peer is in the same session as another peer.
     #[must_use]
     pub fn peers_in_same_session(&self, peer_a: &str, peer_b: &str) -> bool {
-        if let Ok(peers) = self.peers.read() {
-            match (peers.get(peer_a), peers.get(peer_b)) {
+        match self.peers.read() {
+            Ok(peers) => match (peers.get(peer_a), peers.get(peer_b)) {
                 (Some(a), Some(b)) => a.session_id == b.session_id,
                 _ => false,
+            },
+            Err(e) => {
+                tracing::error!(
+                    peer_a = %peer_a,
+                    peer_b = %peer_b,
+                    "Failed to check peers_in_same_session: lock poisoned ({})",
+                    e
+                );
+                false
             }
-        } else {
-            false
         }
     }
     /// Get the underlying `SceneStore` for sharing with MCP.

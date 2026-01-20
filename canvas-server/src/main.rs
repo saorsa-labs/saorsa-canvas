@@ -26,7 +26,7 @@ use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use canvas_server::agui;
-use canvas_server::communitas::{self, ClientDescriptor, CommunitasMcpClient};
+use canvas_server::communitas::{self, ClientDescriptor, CommunitasMcpClient, RetryConfig};
 use canvas_server::health;
 use canvas_server::metrics;
 use canvas_server::routes;
@@ -303,21 +303,60 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
         .ok()
         .and_then(|p| p.parse().ok());
 
-    // Only disable legacy signaling if network_start succeeds
-    let network_ok = match client.network_start(preferred_port).await {
-        Ok(()) => {
-            tracing::info!("Communitas networking (saorsa-webrtc over ant-quic) started");
-            true
+    // Retry network_start with exponential backoff for transient failures
+    let retry_config = RetryConfig::new(5, 500, 8000, 2.0);
+    let mut network_ok = false;
+    let mut last_error: Option<String> = None;
+
+    for attempt in 0..retry_config.max_attempts {
+        match client.network_start(preferred_port).await {
+            Ok(()) => {
+                tracing::info!(
+                    "Communitas networking (saorsa-webrtc over ant-quic) started (attempt {})",
+                    attempt + 1
+                );
+                network_ok = true;
+                break;
+            }
+            Err(err) => {
+                last_error = Some(err.to_string());
+                if !err.is_retryable() {
+                    tracing::warn!(
+                        "Communitas network_start failed with non-retryable error: {}",
+                        err
+                    );
+                    break;
+                }
+
+                if attempt + 1 < retry_config.max_attempts {
+                    let delay = retry_config.delay_for_attempt(attempt);
+                    tracing::warn!(
+                        "Communitas network_start failed (attempt {}/{}), retrying in {}ms: {}",
+                        attempt + 1,
+                        retry_config.max_attempts,
+                        delay,
+                        err
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                } else {
+                    tracing::warn!(
+                        "Communitas network_start failed after {} attempts: {}",
+                        retry_config.max_attempts,
+                        err
+                    );
+                }
+            }
         }
-        Err(err) => {
+    }
+
+    if !network_ok {
+        if let Some(err) = last_error {
             tracing::warn!(
-                "Communitas network_start failed: {}; legacy signaling remains enabled",
+                "Communitas networking unavailable: {}; legacy signaling remains enabled",
                 err
             );
-            false
         }
-    };
-
+    }
     // Always fetch scene to sync state (works even without networking)
     match client.fetch_scene("default").await {
         Ok(document) => match document.clone().into_scene() {

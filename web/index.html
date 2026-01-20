@@ -741,9 +741,12 @@
             function setConnectionStatus(status) {
                 connectionStatus = status;
                 connectionIndicator.className = status;
-                connectionText.textContent = status === 'connected' ? 'Connected' :
-                                             status === 'offline' ? 'Offline' :
-                                             status === 'error' ? 'Error' : 'Connecting...';
+                const statusLabels = {
+                    connected: 'Connected',
+                    offline: 'Offline',
+                    error: 'Error'
+                };
+                connectionText.textContent = statusLabels[status] || 'Connecting...';
                 offlineBanner.className = status === 'offline' ? 'visible' : '';
             }
 
@@ -806,7 +809,22 @@
                     case 'element_added':
                     case 'element_updated':
                     case 'element_removed':
+                        requestSceneSnapshot();
+                        break;
                     case 'sync_result':
+                        console.log('[Canvas] Sync result: synced=' + msg.synced_count + ', conflicts=' + msg.conflict_count);
+                        // Handle failed operations if present
+                        if (msg.failed_operations && msg.failed_operations.length > 0) {
+                            console.warn('[Canvas] Failed sync operations:');
+                            msg.failed_operations.forEach((failure, idx) => {
+                                console.warn('  ' + (idx + 1) + '. ' + failure.operation + 
+                                    (failure.element_id ? ' (element: ' + failure.element_id + ')' : '') +
+                                    ': ' + failure.error);
+                            });
+                            if (msg.conflict_count > msg.failed_operations.length) {
+                                console.warn('  ... and ' + (msg.conflict_count - msg.failed_operations.length) + ' more failures (truncated)');
+                            }
+                        }
                         requestSceneSnapshot();
                         break;
                     case 'ack':
@@ -961,48 +979,39 @@
             window.sendSignaling = sendSignaling;
 
             // Communitas call control functions
-            function startCommunitasCall(videoEnabled = true) {
+            function sendCommunitasMessage(type, extraFields = {}, logMessage = '') {
                 const messageId = `communitas-${Date.now()}-${++messageCounter}`;
-                const message = {
-                    type: 'start_communitas_call',
-                    video_enabled: videoEnabled,
-                    message_id: messageId
-                };
+                const message = { type, message_id: messageId, ...extraFields };
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
                     showErrorToast('Not connected to server');
                     return;
                 }
-                console.log('[Canvas] Starting Communitas call...');
+                console.log(`[Canvas] ${logMessage}`);
                 ws.send(JSON.stringify(message));
+            }
+
+            function startCommunitasCall(videoEnabled = true) {
+                sendCommunitasMessage(
+                    'start_communitas_call',
+                    { video_enabled: videoEnabled },
+                    'Starting Communitas call...'
+                );
             }
 
             function joinCommunitasCall(callId) {
-                const messageId = `communitas-${Date.now()}-${++messageCounter}`;
-                const message = {
-                    type: 'join_communitas_call',
-                    call_id: callId,
-                    message_id: messageId
-                };
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    showErrorToast('Not connected to server');
-                    return;
-                }
-                console.log('[Canvas] Joining Communitas call:', callId);
-                ws.send(JSON.stringify(message));
+                sendCommunitasMessage(
+                    'join_communitas_call',
+                    { call_id: callId },
+                    `Joining Communitas call: ${callId}`
+                );
             }
 
             function leaveCommunitasCall() {
-                const messageId = `communitas-${Date.now()}-${++messageCounter}`;
-                const message = {
-                    type: 'leave_communitas_call',
-                    message_id: messageId
-                };
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    showErrorToast('Not connected to server');
-                    return;
-                }
-                console.log('[Canvas] Leaving Communitas call...');
-                ws.send(JSON.stringify(message));
+                sendCommunitasMessage(
+                    'leave_communitas_call',
+                    {},
+                    'Leaving Communitas call...'
+                );
             }
 
             // Expose Communitas call functions for external use
