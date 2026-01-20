@@ -118,13 +118,136 @@ pub struct WgpuBackend {
 
 impl WgpuBackend {
     /// Create a new WebGPU backend from a browser canvas element.
+    ///
+    /// This method properly initializes wgpu surface, adapter, and device
+    /// together to ensure compatibility (mirroring the native `from_window` flow).
+    /// This fixes SurfaceError::IncompatibleDevice issues in WASM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU initialization fails.
     #[cfg(target_arch = "wasm32")]
     pub fn from_canvas(canvas: HtmlCanvasElement) -> RenderResult<Self> {
+        pollster::block_on(Self::from_canvas_async(canvas))
+    }
+
+    /// Create a wgpu backend from a canvas element asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if GPU initialization fails.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_canvas_async(canvas: HtmlCanvasElement) -> RenderResult<Self> {
         let width = canvas.width();
         let height = canvas.height();
-        let mut backend = Self::new()?;
-        backend.configure_canvas_surface(canvas, width, height)?;
-        Ok(backend)
+
+        // Create instance first
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+            ..Default::default()
+        });
+
+        // Create surface from the canvas (must use same instance for adapter)
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(|e| RenderError::Surface(e.to_string()))?;
+
+        // Get adapter compatible with this surface - critical for avoiding IncompatibleDevice
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or_else(|| RenderError::GpuInit("No suitable GPU adapter found".to_string()))?;
+
+        // Create device from this specific adapter
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Saorsa Canvas Device (WASM)"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| RenderError::GpuInit(e.to_string()))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        // Configure surface with adapter capabilities
+        let caps = surface.get_capabilities(&adapter);
+        let format =
+            caps.formats
+                .iter()
+                .find(|f| f.is_srgb())
+                .copied()
+                .unwrap_or(caps.formats.first().copied().ok_or_else(|| {
+                    RenderError::GpuInit("No surface formats available".to_string())
+                })?);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps
+                .alpha_modes
+                .first()
+                .copied()
+                .ok_or_else(|| RenderError::GpuInit("No alpha modes available".to_string()))?,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        surface.configure(&device, &config);
+
+        // Create buffers and pipeline
+        let (vertex_buffer, index_buffer, uniform_buffer) = Self::create_buffers(&device);
+        let uniform_bind_group_layout = Self::create_bind_group_layout(&device);
+        let quad_pipeline =
+            Self::create_quad_pipeline_with_format(&device, &uniform_bind_group_layout, format);
+
+        // Textured pipeline setup
+        let textured_bind_group_layout = Self::create_textured_bind_group_layout(&device);
+        let textured_pipeline = Self::create_textured_pipeline_with_format(
+            &device,
+            &textured_bind_group_layout,
+            format,
+        );
+        let sampler = Self::create_sampler(&device);
+
+        tracing::info!("wgpu backend initialized with canvas: {}x{}", width, height);
+
+        Ok(Self {
+            device,
+            queue,
+            surface: Some(surface),
+            surface_config: Some(config),
+            quad_pipeline,
+            textured_pipeline,
+            vertex_buffer,
+            index_buffer,
+            uniform_buffer,
+            uniform_bind_group_layout,
+            textured_bind_group_layout,
+            sampler,
+            texture_cache: HashMap::new(),
+            width,
+            height,
+            background_color: wgpu::Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            scale_factor: 1.0,
+        })
     }
 
     /// Create a new wgpu backend without a surface (headless mode).

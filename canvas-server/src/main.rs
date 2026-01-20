@@ -299,6 +299,26 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
         }
     }
 
+    let preferred_port = std::env::var("COMMUNITAS_NETWORK_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok());
+
+    // Only disable legacy signaling if network_start succeeds
+    let network_ok = match client.network_start(preferred_port).await {
+        Ok(()) => {
+            tracing::info!("Communitas networking (saorsa-webrtc over ant-quic) started");
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Communitas network_start failed: {}; legacy signaling remains enabled",
+                err
+            );
+            false
+        }
+    };
+
+    // Always fetch scene to sync state (works even without networking)
     match client.fetch_scene("default").await {
         Ok(document) => match document.clone().into_scene() {
             Ok(scene) => {
@@ -311,7 +331,22 @@ async fn init_communitas_client(sync_state: &SyncState) -> Option<CommunitasMcpC
         Err(err) => tracing::warn!("Communitas fetch_scene failed: {}", err),
     }
 
-    communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
-    tracing::info!("Communitas MCP client connected at {}", url);
+    // Only set client (disabling legacy signaling) if networking succeeded
+    if network_ok {
+        sync_state.set_communitas_client(client.clone());
+        communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
+        tracing::info!(
+            "Communitas MCP client connected at {} (legacy signaling disabled)",
+            url
+        );
+    } else {
+        // Still spawn scene bridge for data sync, but keep legacy signaling
+        communitas::spawn_scene_bridge(sync_state.clone(), client.clone());
+        tracing::info!(
+            "Communitas MCP client connected at {} (legacy signaling still enabled due to network failure)",
+            url
+        );
+    }
+
     Some(client)
 }

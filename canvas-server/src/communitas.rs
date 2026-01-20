@@ -311,6 +311,136 @@ impl CommunitasMcpClient {
         ))
     }
 
+    /// Start the Communitas networking stack (saorsa-gossip over ant-quic).
+    pub async fn network_start(&self, preferred_port: Option<u16>) -> Result<(), CommunitasError> {
+        let mut args = serde_json::Map::new();
+        if let Some(port) = preferred_port {
+            args.insert("preferred_port".to_string(), Value::from(port));
+        }
+
+        let response = self
+            .call_tool("network_start", Some(Value::Object(args)))
+            .await?;
+
+        if response.get("success").and_then(Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(CommunitasError::UnexpectedResponse(format!(
+                "network_start missing success flag: {response}"
+            )))
+        }
+    }
+
+    /// Start a WebRTC call associated with an entity/channel.
+    pub async fn start_voice_call(
+        &self,
+        entity_id: &str,
+        video_enabled: bool,
+    ) -> Result<StartCallResult, CommunitasError> {
+        let response = self
+            .call_tool(
+                "start_voice_call",
+                Some(json!({
+                    "entity_id": entity_id,
+                    "video_enabled": video_enabled,
+                })),
+            )
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// Join an existing WebRTC call.
+    pub async fn join_call(&self, call_id: &str) -> Result<CallAcknowledgeResult, CommunitasError> {
+        let response = self
+            .call_tool("join_call", Some(json!({ "call_id": call_id })))
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// End/leave a call.
+    pub async fn end_call(&self, call_id: &str) -> Result<CallAcknowledgeResult, CommunitasError> {
+        let response = self
+            .call_tool("end_call", Some(json!({ "call_id": call_id })))
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// Toggle mute state.
+    pub async fn toggle_mute(
+        &self,
+        call_id: &str,
+        muted: bool,
+    ) -> Result<ToggleMuteResult, CommunitasError> {
+        let response = self
+            .call_tool(
+                "toggle_mute",
+                Some(json!({
+                    "call_id": call_id,
+                    "muted": muted,
+                })),
+            )
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// Toggle outbound video.
+    pub async fn toggle_video(
+        &self,
+        call_id: &str,
+        enabled: bool,
+    ) -> Result<ToggleVideoResult, CommunitasError> {
+        let response = self
+            .call_tool(
+                "toggle_video",
+                Some(json!({
+                    "call_id": call_id,
+                    "enabled": enabled,
+                })),
+            )
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// Start or stop screen sharing.
+    pub async fn share_screen(
+        &self,
+        call_id: &str,
+        enabled: bool,
+    ) -> Result<ShareScreenResult, CommunitasError> {
+        let response = self
+            .call_tool(
+                "share_screen",
+                Some(json!({
+                    "call_id": call_id,
+                    "enabled": enabled,
+                })),
+            )
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// Fetch current call status snapshot.
+    pub async fn get_call_status(
+        &self,
+        call_id: &str,
+    ) -> Result<CallStatusResult, CommunitasError> {
+        let response = self
+            .call_tool("get_call_status", Some(json!({ "call_id": call_id })))
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
+    /// List current participants in a call.
+    pub async fn get_call_participants(
+        &self,
+        call_id: &str,
+    ) -> Result<CallParticipantsResult, CommunitasError> {
+        let response = self
+            .call_tool("get_call_participants", Some(json!({ "call_id": call_id })))
+            .await?;
+        serde_json::from_value(response).map_err(CommunitasError::from)
+    }
+
     async fn send_rpc<T>(&self, method: &str, params: Option<Value>) -> Result<T, CommunitasError>
     where
         for<'de> T: Deserialize<'de>,
@@ -496,6 +626,86 @@ pub struct ToolInfo {
     pub description: String,
     #[serde(default)]
     pub input_schema: Value,
+}
+
+/// Result payload for `start_voice_call`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartCallResult {
+    /// Unique call identifier assigned by Communitas.
+    pub call_id: String,
+    /// Entity/channel associated with the call.
+    pub entity_id: String,
+    /// Indicates success (Communitas sets this true on success).
+    #[serde(default)]
+    pub success: bool,
+}
+
+/// Result payload for `join_call` / `end_call`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallAcknowledgeResult {
+    /// Target call identifier.
+    pub call_id: String,
+    /// Whether the operation succeeded.
+    #[serde(default)]
+    pub success: bool,
+}
+
+/// Result payload for toggle mute operations.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToggleMuteResult {
+    /// Call identifier.
+    pub call_id: String,
+    /// Whether the participant is muted after the operation.
+    pub muted: bool,
+}
+
+/// Result payload for toggle video operations.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToggleVideoResult {
+    /// Call identifier.
+    pub call_id: String,
+    /// Whether video is enabled after the toggle.
+    #[serde(rename = "video_enabled")]
+    pub video_enabled: bool,
+}
+
+/// Result payload for screen sharing toggles.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareScreenResult {
+    /// Call identifier.
+    pub call_id: String,
+    /// Whether the toggle succeeded.
+    #[serde(default)]
+    pub success: bool,
+    /// Human-readable description ("started"/"stopped").
+    #[serde(default)]
+    pub screen_share: Option<String>,
+}
+
+/// Snapshot of call state returned by `get_call_status`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallStatusResult {
+    /// Call identifier.
+    pub call_id: String,
+    /// Entity/channel identifier.
+    pub entity_id: String,
+    /// Number of participants currently in the call.
+    pub participant_count: usize,
+    /// Unix timestamp when the call started (seconds).
+    pub started_at: i64,
+    /// Whether the local participant is muted.
+    pub is_muted: bool,
+    /// Whether video is enabled.
+    pub is_video_enabled: bool,
+    /// Whether screen sharing is active.
+    pub is_screen_sharing: bool,
+}
+
+/// Participant list result from `get_call_participants`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallParticipantsResult {
+    /// Participant identities (four-word addresses).
+    pub participants: Vec<String>,
 }
 
 /// Connection health state for the Communitas bridge.
@@ -813,6 +1023,71 @@ mod tests {
     use wiremock::matchers::{body_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    // =========================================================================
+    // Unit tests that don't require network/wiremock
+
+    #[test]
+    fn test_communitas_error_is_retryable() {
+        // RPC errors should not be retryable
+        let rpc_err = CommunitasError::Rpc {
+            code: -32000,
+            message: "test error".into(),
+            data: None,
+        };
+        assert!(!rpc_err.is_retryable());
+
+        let url_err = CommunitasError::InvalidUrl("bad url".into());
+        assert!(!url_err.is_retryable());
+
+        let response_err = CommunitasError::UnexpectedResponse("bad response".into());
+        assert!(!response_err.is_retryable());
+    }
+
+    // =========================================================================
+
+    #[test]
+    fn test_retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.initial_delay_ms, 100);
+        assert_eq!(config.max_delay_ms, 10_000);
+    }
+
+    #[test]
+    fn test_client_descriptor_creation() {
+        let desc = ClientDescriptor {
+            name: "test".into(),
+            version: "1.0.0".into(),
+        };
+        assert_eq!(desc.name, "test");
+        assert_eq!(desc.version, "1.0.0");
+    }
+
+    #[test]
+    fn test_invalid_url_error() {
+        let result = CommunitasMcpClient::new(
+            "not-a-valid-url",
+            ClientDescriptor {
+                name: "test".into(),
+                version: "1.0".into(),
+            },
+        );
+        assert!(result.is_err());
+        let err = result.err().expect("expected error");
+        match err {
+            CommunitasError::InvalidUrl(_) => {}
+            other => panic!("Expected InvalidUrl error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_scene_document_sample() {
+        let doc = sample_scene();
+        assert_eq!(doc.session_id, "default");
+        assert_eq!(doc.elements.len(), 1);
+        assert_eq!(doc.viewport.width, 800.0);
+    }
+
     fn sample_scene() -> SceneDocument {
         SceneDocument {
             session_id: "default".to_string(),
@@ -850,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn initialize_success() {
         let server = MockServer::start().await;
 
@@ -877,7 +1152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn call_tool_propagates_error() {
         let server = MockServer::start().await;
 
@@ -906,7 +1181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn fetch_scene_parses_scene_document() {
         let server = MockServer::start().await;
         let scene = sample_scene();
@@ -939,7 +1214,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn authenticate_with_token_sends_request() {
         let server = MockServer::start().await;
 
@@ -963,7 +1238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn bridge_pushes_local_updates() {
         let server = MockServer::start().await;
 
@@ -983,7 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "wiremock/reqwest has system-configuration issues in test environment"]
+    #[ignore = "requires network; macOS system-configuration issue - run on Linux CI: cargo test --ignored"]
     async fn bridge_ignores_remote_events() {
         let server = MockServer::start().await;
         let client = client_with_mock(&server).await;

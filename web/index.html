@@ -84,6 +84,26 @@
             opacity: 0.7;
         }
 
+        #call-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            opacity: 0.85;
+        }
+
+        #call-status .label {
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.5px;
+            opacity: 0.6;
+        }
+
+        #call-status.active #call-state-text {
+            color: #4caf50;
+            font-weight: 600;
+        }
+
         #toolbar {
             position: fixed;
             bottom: 16px;
@@ -244,6 +264,10 @@
             <div id="connection-indicator"></div>
             <span id="connection-text">Initializing...</span>
         </div>
+        <div id="call-status">
+            <span class="label">Call</span>
+            <span id="call-state-text">Idle</span>
+        </div>
         <div id="wasm-status">
             <span id="fps-counter">0 FPS</span>
             <span>|</span>
@@ -312,6 +336,17 @@
             </svg>
         </button>
         <span style="width: 1px; height: 24px; background: rgba(255,255,255,0.2); margin: 0 4px;"></span>
+        <button class="tool-btn" data-tool="communitas-call" id="communitas-call-btn" title="Start Communitas Call">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/>
+            </svg>
+        </button>
+        <button class="tool-btn" data-tool="leave-call" id="leave-call-btn" title="Leave Call" style="display: none;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
+            </svg>
+        </button>
+        <span style="width: 1px; height: 24px; background: rgba(255,255,255,0.2); margin: 0 4px;"></span>
         <button class="tool-btn" data-tool="holographic" id="holographic-btn" title="Looking Glass Mode">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
@@ -363,6 +398,8 @@
             const connectionIndicator = document.getElementById('connection-indicator');
             const connectionText = document.getElementById('connection-text');
             const offlineBanner = document.getElementById('offline-banner');
+            const callStateText = document.getElementById('call-state-text');
+            const callStatus = document.getElementById('call-status');
             const fpsCounter = document.getElementById('fps-counter');
             const elementCountDisplay = document.getElementById('element-count');
             const elementInfo = document.getElementById('element-info');
@@ -380,6 +417,22 @@
             let voiceManager = null;
             let voiceMode = false;
             let currentSession = 'default';
+            let currentCallState = { call_id: null, participants: [] };
+            let legacySignalingAllowed = true;
+            let signalingInitialized = false;
+            let videoStreamListenerAttached = false;
+            window.getCurrentCallState = () => currentCallState;
+
+            // Legacy mode: require localStorage flag (no URL param for security)
+            // To enable: localStorage.setItem('saorsa_legacy_mode', 'enabled') in console
+            // Only works on localhost for security
+            const isLocalhost = window.location.hostname === 'localhost' || 
+                               window.location.hostname === '127.0.0.1';
+            const legacyStorageFlag = localStorage.getItem('saorsa_legacy_mode') === 'enabled';
+            const DEV_MODE = isLocalhost && legacyStorageFlag;
+            if (DEV_MODE) {
+                console.warn('[Canvas] LEGACY MODE enabled via localStorage (localhost only) - this bypasses Communitas networking');
+            }
 
             // Track video element IDs for cleanup (streamId -> elementId)
             const videoElementIds = new Map();
@@ -432,6 +485,10 @@
 
             // Handle video stream changes from VideoManager
             function setupVideoStreamListener() {
+                if (videoStreamListenerAttached) {
+                    return;
+                }
+                videoStreamListenerAttached = true;
                 videoManager.onStreamChange((action, streamId) => {
                     if (action === 'added' && streamId.startsWith('peer-')) {
                         // Auto-create video element for peer stream
@@ -473,6 +530,59 @@
                 });
             }
 
+            function stopStatsCollection() {
+                if (window._statsIntervalId) {
+                    clearInterval(window._statsIntervalId);
+                    window._statsIntervalId = null;
+                }
+            }
+
+            function maybeInitSignalingManager() {
+                if (!legacySignalingAllowed) {
+                    console.info('[Canvas] Legacy WebRTC signaling disabled; using Communitas call state only.');
+                    return;
+                }
+                if (signalingInitialized || signalingManager) {
+                    return;
+                }
+                signalingManager = new SignalingManager(videoManager);
+                signalingInitialized = true;
+                window.signalingManager = signalingManager;
+                console.log('[Canvas] SignalingManager initialized, peer ID:', signalingManager.getPeerId());
+
+                setupVideoStreamListener();
+
+                if (signalingManager && canvasRenderer) {
+                    window._statsIntervalId = signalingManager.startStatsCollection((stats) => {
+                        canvasRenderer.setMediaStats(stats);
+                    }, 1000);
+                }
+            }
+
+            function applyLegacySignalingFlag(enabled) {
+                const previous = legacySignalingAllowed;
+                // DEV_MODE override: only allow on localhost with localStorage flag
+                legacySignalingAllowed = DEV_MODE || enabled;
+
+                if (!legacySignalingAllowed && signalingManager) {
+                    signalingManager.cleanup();
+                    signalingManager = null;
+                    window.signalingManager = null;
+                    signalingInitialized = false;
+                    stopStatsCollection();
+                    if (previous !== legacySignalingAllowed) {
+                        console.info('[Canvas] Legacy WebRTC signaling disabled by server; Communitas (saorsa-webrtc) will carry calls.');
+                    }
+                }
+
+                if (legacySignalingAllowed) {
+                    if (!previous) {
+                        console.info('[Canvas] Legacy WebRTC signaling re-enabled (dev mode).');
+                    }
+                    maybeInitSignalingManager();
+                }
+            }
+
             // Initialize WASM module
             async function initWasm() {
                 try {
@@ -484,10 +594,6 @@
 
                     // Set initial size
                     resizeCanvas();
-
-                    // Also initialize CanvasRenderer for video overlay
-                    const canvas = document.getElementById('main-canvas');
-                    canvasRenderer = new CanvasRenderer(canvas, videoManager);
 
                     loadingText.textContent = 'Ready!';
                     setTimeout(() => {
@@ -600,33 +706,13 @@
                     setConnectionStatus('connected');
                     subscribeToSession(currentSession);
                     requestSceneSnapshot();
-
-                    // Initialize SignalingManager for WebRTC calls
-                    if (!signalingManager) {
-                        signalingManager = new SignalingManager(videoManager);
-                        window.signalingManager = signalingManager; // Expose for console debugging
-                        console.log('[Canvas] SignalingManager initialized, peer ID:', signalingManager.getPeerId());
-                    }
-
-                    // Setup auto video element creation for peer streams
-                    setupVideoStreamListener();
-
-                    // Start media stats collection for debug overlay
-                    if (signalingManager && canvasRenderer) {
-                        window._statsIntervalId = signalingManager.startStatsCollection((stats) => {
-                            canvasRenderer.setMediaStats(stats);
-                        }, 1000);
-                    }
                 };
 
                 ws.onclose = () => {
                     setConnectionStatus('offline');
 
                     // Stop stats collection
-                    if (window._statsIntervalId) {
-                        clearInterval(window._statsIntervalId);
-                        window._statsIntervalId = null;
-                    }
+                    stopStatsCollection();
 
                     // Cleanup SignalingManager on disconnect
                     if (signalingManager) {
@@ -634,6 +720,7 @@
                         signalingManager = null;
                         window.signalingManager = null;
                     }
+                    signalingInitialized = false;
                     setTimeout(connect, 3000);
                 };
 
@@ -660,6 +747,34 @@
                 offlineBanner.className = status === 'offline' ? 'visible' : '';
             }
 
+            function handleCallStateUpdate(state) {
+                if (!state || (state.session_id && state.session_id !== currentSession)) {
+                    return;
+                }
+
+                currentCallState = {
+                    call_id: state.call_id || null,
+                    participants: state.participants || []
+                };
+
+                if (!callStateText || !callStatus) {
+                    return;
+                }
+
+                if (currentCallState.call_id) {
+                    const shortId = currentCallState.call_id.slice(0, 8);
+                    const participantCount = currentCallState.participants.length;
+                    callStatus.classList.add('active');
+                    callStateText.textContent = `Active ${shortId} (${participantCount})`;
+                } else {
+                    callStatus.classList.remove('active');
+                    callStateText.textContent = 'Idle';
+                }
+
+                // Update button visibility
+                updateCallButtons();
+            }
+
             function handleMessage(msg) {
                 switch (msg.type) {
                     case 'welcome':
@@ -667,6 +782,8 @@
                         if (msg.session_id) {
                             currentSession = msg.session_id;
                         }
+                        const allowLegacy = msg.legacy_signaling !== false;
+                        applyLegacySignalingFlag(allowLegacy);
                         requestSceneSnapshot();
                         break;
                     case 'scene_update':
@@ -714,6 +831,26 @@
                         }
                         console.error('Server error:', msg.code, msg.message);
                         showErrorToast(msg.message || 'Server error');
+                        break;
+                    case 'call_state':
+                        handleCallStateUpdate(msg);
+                        break;
+
+                    case 'communitas_call_result':
+                        // Handle Communitas call operation result
+                        if (msg.success) {
+                            console.log(`[Canvas] Communitas ${msg.operation} succeeded`, msg.call_id ? `call_id: ${msg.call_id}` : '');
+                            if (msg.operation === 'start' && msg.call_id) {
+                                // Update call state immediately on successful start
+                                handleCallStateUpdate({ call_id: msg.call_id, participants: [] });
+                            } else if (msg.operation === 'leave') {
+                                // Clear call state on leave
+                                handleCallStateUpdate({ call_id: null, participants: [] });
+                            }
+                        } else {
+                            console.error(`[Canvas] Communitas ${msg.operation} failed:`, msg.error);
+                            showErrorToast(`Call ${msg.operation} failed: ${msg.error || 'Unknown error'}`);
+                        }
                         break;
 
                     // WebRTC signaling messages - forwarded to SignalingManager
@@ -807,6 +944,10 @@
 
             // WebRTC signaling message helpers
             function sendSignaling(type, payload) {
+                if (!legacySignalingAllowed) {
+                    console.warn('[Canvas] Ignoring signaling message (legacy signaling disabled).', type);
+                    return false;
+                }
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
                     console.error('Cannot send signaling message: WebSocket not connected');
                     return false;
@@ -818,6 +959,75 @@
 
             // Expose signaling helpers for SignalingManager
             window.sendSignaling = sendSignaling;
+
+            // Communitas call control functions
+            function startCommunitasCall(videoEnabled = true) {
+                const messageId = `communitas-${Date.now()}-${++messageCounter}`;
+                const message = {
+                    type: 'start_communitas_call',
+                    video_enabled: videoEnabled,
+                    message_id: messageId
+                };
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showErrorToast('Not connected to server');
+                    return;
+                }
+                console.log('[Canvas] Starting Communitas call...');
+                ws.send(JSON.stringify(message));
+            }
+
+            function joinCommunitasCall(callId) {
+                const messageId = `communitas-${Date.now()}-${++messageCounter}`;
+                const message = {
+                    type: 'join_communitas_call',
+                    call_id: callId,
+                    message_id: messageId
+                };
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showErrorToast('Not connected to server');
+                    return;
+                }
+                console.log('[Canvas] Joining Communitas call:', callId);
+                ws.send(JSON.stringify(message));
+            }
+
+            function leaveCommunitasCall() {
+                const messageId = `communitas-${Date.now()}-${++messageCounter}`;
+                const message = {
+                    type: 'leave_communitas_call',
+                    message_id: messageId
+                };
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showErrorToast('Not connected to server');
+                    return;
+                }
+                console.log('[Canvas] Leaving Communitas call...');
+                ws.send(JSON.stringify(message));
+            }
+
+            // Expose Communitas call functions for external use
+            window.startCommunitasCall = startCommunitasCall;
+            window.joinCommunitasCall = joinCommunitasCall;
+            window.leaveCommunitasCall = leaveCommunitasCall;
+
+            // Update call UI buttons based on call state
+            function updateCallButtons() {
+                const startBtn = document.getElementById('communitas-call-btn');
+                const leaveBtn = document.getElementById('leave-call-btn');
+                if (!startBtn || !leaveBtn) return;
+
+                if (currentCallState.call_id) {
+                    // In a call - show leave button, hide/style start button
+                    startBtn.style.display = 'none';
+                    leaveBtn.style.display = 'flex';
+                    leaveBtn.style.backgroundColor = '#f44336';
+                } else {
+                    // Not in a call - show start button, hide leave button
+                    startBtn.style.display = 'flex';
+                    startBtn.style.backgroundColor = '';
+                    leaveBtn.style.display = 'none';
+                }
+            }
 
             // Error toast for user feedback
             let errorToastTimeout = null;
@@ -1126,6 +1336,17 @@
                     // Handle holographic mode toggle
                     if (tool === 'holographic') {
                         await toggleHolographicMode();
+                        return;
+                    }
+
+                    // Handle Communitas call controls
+                    if (tool === 'communitas-call') {
+                        startCommunitasCall(true);
+                        return;
+                    }
+
+                    if (tool === 'leave-call') {
+                        leaveCommunitasCall();
                         return;
                     }
 

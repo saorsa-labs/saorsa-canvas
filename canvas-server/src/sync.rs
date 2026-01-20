@@ -39,7 +39,8 @@
 //! - `{"type": "relay_ice_candidate", "from_peer_id": "...", "candidate": "..."}`
 //! - `{"type": "call_ended", "from_peer_id": "...", "reason": "..."}`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,6 +54,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::communitas::CommunitasMcpClient;
 use crate::metrics::{record_rate_limited, record_validation_failure};
 use crate::validation::{
     validate_element_id, validate_ice_candidate, validate_message_size, validate_peer_id,
@@ -234,6 +236,31 @@ pub enum ClientMessage {
         /// Target peer ID.
         target_peer_id: String,
     },
+
+    // === Communitas Call Control Messages ===
+    /// Start a new Communitas-backed call for the current session.
+    StartCommunitasCall {
+        /// Whether video should be enabled for this call.
+        #[serde(default)]
+        video_enabled: bool,
+        /// Optional message ID for acknowledgment.
+        #[serde(default)]
+        message_id: Option<String>,
+    },
+    /// Join an existing Communitas call by call ID.
+    JoinCommunitasCall {
+        /// The call ID to join.
+        call_id: String,
+        /// Optional message ID for acknowledgment.
+        #[serde(default)]
+        message_id: Option<String>,
+    },
+    /// Leave the current Communitas call.
+    LeaveCommunitasCall {
+        /// Optional message ID for acknowledgment.
+        #[serde(default)]
+        message_id: Option<String>,
+    },
 }
 
 /// Server-to-client WebSocket message types.
@@ -248,6 +275,9 @@ pub enum ServerMessage {
         session_id: String,
         /// Connection timestamp.
         timestamp: u64,
+        /// Whether legacy (browser-native) signaling is enabled.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        legacy_signaling: Option<bool>,
     },
     /// Full scene state update.
     SceneUpdate {
@@ -308,6 +338,32 @@ pub enum ServerMessage {
         conflict_count: usize,
         /// Event timestamp.
         timestamp: u64,
+    },
+    /// Communitas call state update for this session.
+    CallState {
+        /// Session identifier for this call state.
+        session_id: String,
+        /// Active Communitas call ID (if established).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// Active peer IDs participating in the call.
+        participants: Vec<String>,
+    },
+    /// Result of a Communitas call operation.
+    CommunitasCallResult {
+        /// The operation that was performed.
+        operation: String,
+        /// Whether the operation succeeded.
+        success: bool,
+        /// Call ID if available.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// Error message if operation failed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// Related message ID for acknowledgment.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
 
     // === WebRTC Signaling Messages ===
@@ -388,6 +444,43 @@ pub enum QueuedOperation {
     },
 }
 
+impl QueuedOperation {
+    /// Get the type of this operation as a string.
+    #[must_use]
+    pub fn operation_type(&self) -> &'static str {
+        match self {
+            Self::Add { .. } => "add",
+            Self::Update { .. } => "update",
+            Self::Remove { .. } => "remove",
+        }
+    }
+}
+
+/// Result of processing queued offline operations.
+#[derive(Debug, Clone)]
+pub struct ProcessQueueResult {
+    /// Number of operations successfully processed.
+    pub processed_count: usize,
+    /// Number of operations that failed.
+    pub failed_count: usize,
+    /// Failed operations with error messages.
+    pub failed_ops: Vec<(QueuedOperation, String)>,
+    /// Processing timestamp.
+    pub timestamp: u64,
+}
+
+impl ProcessQueueResult {
+    /// Convert to a ServerMessage for broadcasting.
+    #[must_use]
+    pub fn into_server_message(self) -> ServerMessage {
+        ServerMessage::SyncResult {
+            synced_count: self.processed_count,
+            conflict_count: self.failed_count,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
 /// Origin of a scene event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncOrigin {
@@ -420,6 +513,34 @@ pub struct PeerInfo {
 /// Registry of connected peers for signaling.
 type PeerRegistry = Arc<RwLock<HashMap<String, PeerInfo>>>;
 
+/// Active Communitas call metadata per session.
+#[derive(Debug, Clone)]
+struct ActiveCall {
+    /// Call identifier assigned by Communitas.
+    call_id: Option<String>,
+    /// Entity/channel identifier mirrored from Communitas (defaults to session ID).
+    entity_id: String,
+    /// Connected peer IDs participating in this call.
+    participants: HashSet<String>,
+}
+
+impl ActiveCall {
+    fn new(session_id: &str) -> Self {
+        Self {
+            call_id: None,
+            entity_id: session_id.to_string(),
+            participants: HashSet::new(),
+        }
+    }
+}
+
+/// Lightweight snapshot for broadcasting to clients.
+#[derive(Debug, Clone, Default)]
+struct CallSnapshot {
+    call_id: Option<String>,
+    participants: Vec<String>,
+}
+
 /// Shared state for WebSocket synchronization.
 ///
 /// Wraps a [`SceneStore`] and adds broadcast notifications for real-time sync.
@@ -434,6 +555,12 @@ pub struct SyncState {
     offline_queue: Arc<RwLock<OfflineQueue>>,
     /// Registry of connected peers for WebRTC signaling.
     peers: PeerRegistry,
+    /// Active Communitas-backed call state keyed by session.
+    active_calls: Arc<RwLock<HashMap<String, ActiveCall>>>,
+    /// Optional Communitas MCP client for upstream call management.
+    communitas: Arc<RwLock<Option<CommunitasMcpClient>>>,
+    /// Counter for sync conflicts/failures.
+    conflict_count: Arc<AtomicU64>,
 }
 
 impl SyncState {
@@ -447,7 +574,435 @@ impl SyncState {
             event_tx,
             offline_queue: Arc::new(RwLock::new(OfflineQueue::new())),
             peers: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            communitas: Arc::new(RwLock::new(None)),
+            conflict_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Install a Communitas MCP client for upstream media coordination.
+    pub fn set_communitas_client(&self, client: CommunitasMcpClient) {
+        if let Ok(mut guard) = self.communitas.write() {
+            *guard = Some(client);
+        }
+    }
+
+    /// Returns true when a Communitas MCP client is configured.
+    pub fn communitas_enabled(&self) -> bool {
+        self.communitas
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Returns true if legacy WebRTC signaling should remain available.
+    pub fn legacy_signaling_enabled(&self) -> bool {
+        !self.communitas_enabled()
+    }
+
+    fn communitas_client(&self) -> Option<CommunitasMcpClient> {
+        self.communitas.read().ok().and_then(|guard| guard.clone())
+    }
+
+    fn call_snapshot(&self, session_id: &str) -> CallSnapshot {
+        if let Ok(calls) = self.active_calls.read() {
+            if let Some(call) = calls.get(session_id) {
+                let mut participants: Vec<_> = call.participants.iter().cloned().collect();
+                participants.sort();
+                return CallSnapshot {
+                    call_id: call.call_id.clone(),
+                    participants,
+                };
+            }
+        }
+        CallSnapshot::default()
+    }
+
+    fn broadcast_call_state(&self, session_id: &str) {
+        let snapshot = self.call_snapshot(session_id);
+        let message = ServerMessage::CallState {
+            session_id: session_id.to_string(),
+            call_id: snapshot.call_id,
+            participants: snapshot.participants,
+        };
+        self.broadcast(session_id, message, SyncOrigin::Local);
+    }
+
+    /// Track a peer joining the active session call (creating it if needed).
+    ///
+    /// This method:
+    /// - Creates a new call via `start_voice_call` if no call exists
+    /// - Joins the existing call via `join_call` if a call is already active
+    pub fn add_call_participant(&self, session_id: &str, peer_id: &str) {
+        let (should_start, should_join) = {
+            let mut calls = match self.active_calls.write() {
+                Ok(c) => c,
+                Err(_) => {
+                    tracing::error!("Failed to acquire calls lock for add_call_participant");
+                    return;
+                }
+            };
+
+            let entry = calls
+                .entry(session_id.to_string())
+                .or_insert_with(|| ActiveCall::new(session_id));
+
+            // Only proceed if this is a new participant
+            if !entry.participants.insert(peer_id.to_string()) {
+                // Already a participant
+                (false, None)
+            } else if entry.call_id.is_none() {
+                // First participant, need to start a call
+                (true, None)
+            } else {
+                // Existing call, need to join
+                (false, entry.call_id.clone())
+            }
+        };
+
+        self.broadcast_call_state(session_id);
+
+        if should_start {
+            self.spawn_communitas_start(session_id.to_string(), peer_id.to_string());
+        } else if let Some(call_id) = should_join {
+            self.spawn_communitas_join(session_id.to_string(), peer_id.to_string(), call_id);
+        }
+    }
+
+    /// Track a peer leaving the session call.
+    ///
+    /// This method always invokes `end_call` upstream for the leaving peer,
+    /// ensuring proper cleanup on the Communitas side.
+    pub fn remove_call_participant(&self, session_id: &str, peer_id: &str) {
+        let call_id = {
+            let mut calls = match self.active_calls.write() {
+                Ok(c) => c,
+                Err(_) => {
+                    tracing::error!("Failed to acquire calls lock for remove_call_participant");
+                    return;
+                }
+            };
+
+            if let Some(call) = calls.get_mut(session_id) {
+                call.participants.remove(peer_id);
+                let call_id = call.call_id.clone();
+
+                // Remove the call entry if no participants left
+                if call.participants.is_empty() {
+                    calls.remove(session_id);
+                }
+
+                call_id
+            } else {
+                None
+            }
+        };
+
+        self.broadcast_call_state(session_id);
+
+        // Always notify upstream when a peer leaves (not just the last one)
+        if let Some(call_id) = call_id {
+            self.spawn_communitas_leave(session_id.to_string(), peer_id.to_string(), call_id);
+        }
+    }
+
+    fn set_call_metadata(&self, session_id: &str, call_id: String, entity_id: String) {
+        let mut updated = false;
+        if let Ok(mut calls) = self.active_calls.write() {
+            if let Some(entry) = calls.get_mut(session_id) {
+                entry.call_id = Some(call_id);
+                entry.entity_id = entity_id;
+                updated = true;
+            }
+        }
+        if updated {
+            self.broadcast_call_state(session_id);
+        }
+    }
+
+    fn spawn_communitas_start(&self, session_id: String, peer_id: String) {
+        if let Some(client) = self.communitas_client() {
+            let state = self.clone();
+            tokio::spawn(async move {
+                match client.start_voice_call(&session_id, true).await {
+                    Ok(result) => {
+                        state.set_call_metadata(
+                            &session_id,
+                            result.call_id.clone(),
+                            result.entity_id,
+                        );
+                        tracing::info!(
+                            "Peer {} started Communitas call {} in session {}",
+                            peer_id,
+                            result.call_id,
+                            session_id
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to start Communitas call for peer {} in session {}: {}",
+                            peer_id,
+                            session_id,
+                            err
+                        );
+                        // Notify the peer of the failure
+                        state.send_to_peer(
+                            &peer_id,
+                            ServerMessage::CommunitasCallResult {
+                                operation: "start".to_string(),
+                                success: false,
+                                call_id: None,
+                                error: Some(err.to_string()),
+                                message_id: None,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    fn spawn_communitas_join(&self, session_id: String, peer_id: String, call_id: String) {
+        if let Some(client) = self.communitas_client() {
+            let state = self.clone();
+            let call_id_clone = call_id.clone();
+            tokio::spawn(async move {
+                match client.join_call(&call_id_clone).await {
+                    Ok(result) => {
+                        if result.success {
+                            tracing::info!(
+                                "Peer {} joined Communitas call {} in session {}",
+                                peer_id,
+                                call_id_clone,
+                                session_id
+                            );
+                        } else {
+                            tracing::warn!(
+                                "join_call returned failure for peer {} in call {}",
+                                peer_id,
+                                call_id_clone
+                            );
+                            state.send_to_peer(
+                                &peer_id,
+                                ServerMessage::CommunitasCallResult {
+                                    operation: "join".to_string(),
+                                    success: false,
+                                    call_id: Some(call_id_clone),
+                                    error: Some("join_call returned failure".to_string()),
+                                    message_id: None,
+                                },
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to join Communitas call {} for peer {} in session {}: {}",
+                            call_id_clone,
+                            peer_id,
+                            session_id,
+                            err
+                        );
+                        state.send_to_peer(
+                            &peer_id,
+                            ServerMessage::CommunitasCallResult {
+                                operation: "join".to_string(),
+                                success: false,
+                                call_id: Some(call_id_clone),
+                                error: Some(err.to_string()),
+                                message_id: None,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    fn spawn_communitas_leave(&self, session_id: String, peer_id: String, call_id: String) {
+        if let Some(client) = self.communitas_client() {
+            let state = self.clone();
+            let call_id_clone = call_id.clone();
+            tokio::spawn(async move {
+                match client.end_call(&call_id_clone).await {
+                    Ok(result) => {
+                        if result.success {
+                            tracing::info!(
+                                "Peer {} left Communitas call {} in session {}",
+                                peer_id,
+                                call_id_clone,
+                                session_id
+                            );
+                        } else {
+                            tracing::warn!(
+                                "end_call returned failure for peer {} leaving call {}",
+                                peer_id,
+                                call_id_clone
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to end Communitas call {} for peer {} leaving session {}: {}",
+                            call_id_clone,
+                            peer_id,
+                            session_id,
+                            err
+                        );
+                        // Notify peer of leave failure (may help with retry logic)
+                        state.send_to_peer(
+                            &peer_id,
+                            ServerMessage::CommunitasCallResult {
+                                operation: "leave".to_string(),
+                                success: false,
+                                call_id: Some(call_id_clone),
+                                error: Some(err.to_string()),
+                                message_id: None,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    /// Start a new Communitas call for the session.
+    ///
+    /// Returns the call ID on success, or an error message on failure.
+    pub async fn start_communitas_call_async(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+        video_enabled: bool,
+    ) -> Result<String, String> {
+        let client = self
+            .communitas_client()
+            .ok_or_else(|| "Communitas not configured".to_string())?;
+
+        let result = client
+            .start_voice_call(session_id, video_enabled)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Update call metadata
+        self.set_call_metadata(session_id, result.call_id.clone(), result.entity_id);
+        // Add this peer as participant
+        if let Ok(mut calls) = self.active_calls.write() {
+            if let Some(call) = calls.get_mut(session_id) {
+                call.participants.insert(peer_id.to_string());
+            }
+        }
+        self.broadcast_call_state(session_id);
+
+        tracing::info!(
+            "Started Communitas call {} for session {} (video={})",
+            result.call_id,
+            session_id,
+            video_enabled
+        );
+
+        Ok(result.call_id)
+    }
+
+    /// Join an existing Communitas call.
+    ///
+    /// Returns Ok on success, or an error message on failure.
+    pub async fn join_communitas_call_async(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+        call_id: &str,
+    ) -> Result<(), String> {
+        let client = self
+            .communitas_client()
+            .ok_or_else(|| "Communitas not configured".to_string())?;
+
+        let result = client.join_call(call_id).await.map_err(|e| e.to_string())?;
+
+        if !result.success {
+            return Err("join_call returned failure".to_string());
+        }
+
+        // Add participant to local state
+        if let Ok(mut calls) = self.active_calls.write() {
+            let entry = calls
+                .entry(session_id.to_string())
+                .or_insert_with(|| ActiveCall::new(session_id));
+            entry.call_id = Some(call_id.to_string());
+            entry.participants.insert(peer_id.to_string());
+        }
+        self.broadcast_call_state(session_id);
+
+        tracing::info!(
+            "Peer {} joined Communitas call {} in session {}",
+            peer_id,
+            call_id,
+            session_id
+        );
+
+        Ok(())
+    }
+
+    /// Leave the current Communitas call.
+    ///
+    /// Returns Ok on success, or an error message on failure.
+    pub async fn leave_communitas_call_async(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+    ) -> Result<(), String> {
+        let call_id = {
+            let calls = self.active_calls.read().map_err(|_| "lock poisoned")?;
+            calls
+                .get(session_id)
+                .and_then(|c| c.call_id.clone())
+                .ok_or_else(|| "no active call in session".to_string())?
+        };
+
+        let client = self
+            .communitas_client()
+            .ok_or_else(|| "Communitas not configured".to_string())?;
+
+        // Call end_call to signal we're leaving
+        let result = client.end_call(&call_id).await.map_err(|e| e.to_string())?;
+
+        if !result.success {
+            tracing::warn!(
+                "end_call returned failure for peer {} leaving call {}",
+                peer_id,
+                call_id
+            );
+        }
+
+        // Remove participant from local state
+        let mut should_end = false;
+        if let Ok(mut calls) = self.active_calls.write() {
+            if let Some(call) = calls.get_mut(session_id) {
+                call.participants.remove(peer_id);
+                if call.participants.is_empty() {
+                    should_end = true;
+                    calls.remove(session_id);
+                }
+            }
+        }
+        self.broadcast_call_state(session_id);
+
+        tracing::info!(
+            "Peer {} left Communitas call {} in session {} (ended={})",
+            peer_id,
+            call_id,
+            session_id,
+            should_end
+        );
+
+        Ok(())
+    }
+
+    /// Clear the Communitas client reference, re-enabling legacy signaling.
+    pub fn clear_communitas_client(&self) {
+        if let Ok(mut guard) = self.communitas.write() {
+            *guard = None;
+        }
+        tracing::info!("Cleared Communitas client, legacy signaling re-enabled");
     }
 
     /// Register a peer connection.
@@ -474,20 +1029,33 @@ impl SyncState {
 
     /// Update a peer's session.
     pub fn update_peer_session(&self, peer_id: &str, session_id: &str) {
+        let mut previous: Option<String> = None;
         if let Ok(mut peers) = self.peers.write() {
             if let Some(info) = peers.get_mut(peer_id) {
-                info.session_id = session_id.to_string();
-                tracing::debug!("Updated peer {} to session {}", peer_id, session_id);
+                if info.session_id != session_id {
+                    previous = Some(info.session_id.clone());
+                    info.session_id = session_id.to_string();
+                    tracing::debug!("Updated peer {} to session {}", peer_id, session_id);
+                }
             }
+        }
+        if let Some(old_session) = previous {
+            self.remove_call_participant(&old_session, peer_id);
         }
     }
 
     /// Unregister a peer connection.
     pub fn unregister_peer(&self, peer_id: &str) {
-        if let Ok(mut peers) = self.peers.write() {
-            if peers.remove(peer_id).is_some() {
-                tracing::info!("Unregistered peer {}", peer_id);
-            }
+        let session = if let Ok(mut peers) = self.peers.write() {
+            peers.remove(peer_id).map(|info| info.session_id)
+        } else {
+            None
+        };
+        if let Some(session_id) = session {
+            tracing::info!("Unregistered peer {} from session {}", peer_id, session_id);
+            self.remove_call_participant(&session_id, peer_id);
+        } else {
+            tracing::info!("Unregistered peer {}", peer_id);
         }
     }
 
@@ -711,37 +1279,64 @@ impl SyncState {
         ServerMessage::SceneUpdate { scene: document }
     }
 
-    /// Process queued offline operations.
+    /// Process queued offline operations with full error tracking.
+    ///
+    /// Returns a detailed result with processed/failed counts and error details
+    /// for operations that could not be applied.
     #[must_use]
     pub fn process_queue(
         &self,
         session_id: &str,
         operations: Vec<QueuedOperation>,
-    ) -> ServerMessage {
-        let mut synced_count = 0;
-        let conflict_count = 0;
+    ) -> ProcessQueueResult {
+        let mut processed_count = 0;
+        let mut failed_ops: Vec<(QueuedOperation, String)> = Vec::new();
 
         for op in operations {
-            let result = match op {
+            let result = match &op {
                 QueuedOperation::Add { element, .. } => {
-                    self.add_element(session_id, &element).map(|_| ())
+                    self.add_element(session_id, element).map(|_| ())
                 }
                 QueuedOperation::Update { id, changes, .. } => {
-                    self.update_element(session_id, &id, &changes).map(|_| ())
+                    self.update_element(session_id, id, changes).map(|_| ())
                 }
-                QueuedOperation::Remove { id, .. } => self.remove_element(session_id, &id),
+                QueuedOperation::Remove { id, .. } => self.remove_element(session_id, id),
             };
 
-            if result.is_ok() {
-                synced_count += 1;
+            match result {
+                Ok(()) => processed_count += 1,
+                Err(err) => {
+                    let error_msg = err.to_string();
+                    tracing::warn!(
+                        "process_queue failed for op {:?}: {}",
+                        op.operation_type(),
+                        error_msg
+                    );
+                    failed_ops.push((op, error_msg));
+                }
             }
         }
 
-        ServerMessage::SyncResult {
-            synced_count,
-            conflict_count,
+        let failed_count = failed_ops.len();
+
+        // Update conflict counter
+        if failed_count > 0 {
+            self.conflict_count
+                .fetch_add(failed_count as u64, Ordering::Relaxed);
+        }
+
+        ProcessQueueResult {
+            processed_count,
+            failed_count,
+            failed_ops,
             timestamp: current_timestamp(),
         }
+    }
+
+    /// Get total conflict count since server start.
+    #[must_use]
+    pub fn total_conflict_count(&self) -> u64 {
+        self.conflict_count.load(Ordering::Relaxed)
     }
 
     /// Broadcast a message to all clients subscribed to a session.
@@ -851,6 +1446,16 @@ impl ClientConnection {
         }
     }
 
+    /// Error returned when legacy signaling is disabled.
+    fn legacy_disabled_error(message_id: Option<String>) -> ServerMessage {
+        ServerMessage::Error {
+            code: "legacy_signaling_disabled".to_string(),
+            message: "Legacy WebRTC signaling is disabled; Communitas handles calls upstream."
+                .to_string(),
+            message_id,
+        }
+    }
+
     /// Handle an incoming client message.
     pub fn handle_message(&mut self, msg: ClientMessage) -> Option<ServerMessage> {
         match msg {
@@ -933,7 +1538,17 @@ impl ClientConnection {
                 timestamp: current_timestamp(),
             }),
             ClientMessage::SyncQueue { operations } => {
-                Some(self.state.process_queue(&self.session_id, operations))
+                let result = self.state.process_queue(&self.session_id, operations);
+                // Log any failed operations for debugging
+                for (op, err) in &result.failed_ops {
+                    tracing::debug!(
+                        "Client {} sync op {} failed: {}",
+                        self.peer_id,
+                        op.operation_type(),
+                        err
+                    );
+                }
+                Some(result.into_server_message())
             }
             ClientMessage::GetScene => Some(self.state.get_scene_update(&self.session_id)),
 
@@ -942,15 +1557,36 @@ impl ClientConnection {
                 target_peer_id,
                 session_id,
             } => {
-                // Validate peer_id and session_id
-                if let Err(e) = validate_peer_id(&target_peer_id) {
-                    tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
-                    record_validation_failure("peer_id");
-                    return Some(Self::validation_error(&e, None));
-                }
+                // Validate session_id
                 if let Err(e) = validate_session_id(&session_id) {
                     tracing::warn!("Invalid session_id from peer {}: {}", self.peer_id, e);
                     record_validation_failure("session_id");
+                    return Some(Self::validation_error(&e, None));
+                }
+
+                if session_id != self.session_id {
+                    return Some(ServerMessage::Error {
+                        code: "invalid_session".to_string(),
+                        message: "Cannot start call outside active session".to_string(),
+                        message_id: None,
+                    });
+                }
+
+                if !self.state.legacy_signaling_enabled() {
+                    tracing::info!(
+                        "Peer {} joining Communitas-managed call for session {}",
+                        self.peer_id,
+                        self.session_id
+                    );
+                    self.state
+                        .add_call_participant(&self.session_id, &self.peer_id);
+                    return None;
+                }
+
+                // Validate peer_id when legacy signaling is enabled
+                if let Err(e) = validate_peer_id(&target_peer_id) {
+                    tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
+                    record_validation_failure("peer_id");
                     return Some(Self::validation_error(&e, None));
                 }
 
@@ -972,20 +1608,33 @@ impl ClientConnection {
                 }
 
                 tracing::info!("Peer {} starting call to {}", self.peer_id, target_peer_id);
-                self.state.send_to_peer(
+                let sent = self.state.send_to_peer(
                     &target_peer_id,
                     ServerMessage::IncomingCall {
                         from_peer_id: self.peer_id.clone(),
                         session_id,
                     },
                 );
-                None
+                if sent {
+                    self.state
+                        .add_call_participant(&self.session_id, &self.peer_id);
+                    None
+                } else {
+                    Some(ServerMessage::Error {
+                        code: "peer_not_found".to_string(),
+                        message: "Target peer is no longer connected".to_string(),
+                        message_id: None,
+                    })
+                }
             }
 
             ClientMessage::Offer {
                 target_peer_id,
                 sdp,
             } => {
+                if !self.state.legacy_signaling_enabled() {
+                    return Some(Self::legacy_disabled_error(None));
+                }
                 // Validate peer_id and SDP
                 if let Err(e) = validate_peer_id(&target_peer_id) {
                     tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
@@ -1013,6 +1662,11 @@ impl ClientConnection {
                 target_peer_id,
                 sdp,
             } => {
+                if !self.state.legacy_signaling_enabled() {
+                    self.state
+                        .add_call_participant(&self.session_id, &self.peer_id);
+                    return Some(Self::legacy_disabled_error(None));
+                }
                 // Validate peer_id and SDP
                 if let Err(e) = validate_peer_id(&target_peer_id) {
                     tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
@@ -1030,6 +1684,8 @@ impl ClientConnection {
                     self.peer_id,
                     target_peer_id
                 );
+                self.state
+                    .add_call_participant(&self.session_id, &self.peer_id);
                 self.state.send_to_peer(
                     &target_peer_id,
                     ServerMessage::RelayAnswer {
@@ -1046,6 +1702,9 @@ impl ClientConnection {
                 sdp_mid,
                 sdp_m_line_index,
             } => {
+                if !self.state.legacy_signaling_enabled() {
+                    return Some(Self::legacy_disabled_error(None));
+                }
                 // Validate peer_id and ICE candidate
                 if let Err(e) = validate_peer_id(&target_peer_id) {
                     tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
@@ -1076,6 +1735,12 @@ impl ClientConnection {
             }
 
             ClientMessage::EndCall { target_peer_id } => {
+                if !self.state.legacy_signaling_enabled() {
+                    tracing::info!("Peer {} leaving Communitas-managed call", self.peer_id);
+                    self.state
+                        .remove_call_participant(&self.session_id, &self.peer_id);
+                    return None;
+                }
                 // Validate peer_id
                 if let Err(e) = validate_peer_id(&target_peer_id) {
                     tracing::warn!("Invalid target_peer_id from peer {}: {}", self.peer_id, e);
@@ -1084,6 +1749,8 @@ impl ClientConnection {
                 }
 
                 tracing::info!("Peer {} ending call with {}", self.peer_id, target_peer_id);
+                self.state
+                    .remove_call_participant(&self.session_id, &self.peer_id);
                 self.state.send_to_peer(
                     &target_peer_id,
                     ServerMessage::CallEnded {
@@ -1091,6 +1758,134 @@ impl ClientConnection {
                         reason: "peer_hangup".to_string(),
                     },
                 );
+                None
+            }
+
+            // === Communitas Call Control Messages ===
+            ClientMessage::StartCommunitasCall {
+                video_enabled,
+                message_id,
+            } => {
+                if !self.state.communitas_enabled() {
+                    return Some(ServerMessage::CommunitasCallResult {
+                        operation: "start".to_string(),
+                        success: false,
+                        call_id: None,
+                        error: Some("Communitas not configured; use legacy signaling".to_string()),
+                        message_id,
+                    });
+                }
+
+                // Spawn async task to start the call and send result
+                let state = self.state.clone();
+                let peer_id = self.peer_id.clone();
+                let session_id = self.session_id.clone();
+                tokio::spawn(async move {
+                    let result = state
+                        .start_communitas_call_async(&session_id, &peer_id, video_enabled)
+                        .await;
+                    let message = match result {
+                        Ok(call_id) => ServerMessage::CommunitasCallResult {
+                            operation: "start".to_string(),
+                            success: true,
+                            call_id: Some(call_id),
+                            error: None,
+                            message_id,
+                        },
+                        Err(e) => ServerMessage::CommunitasCallResult {
+                            operation: "start".to_string(),
+                            success: false,
+                            call_id: None,
+                            error: Some(e),
+                            message_id,
+                        },
+                    };
+                    state.send_to_peer(&peer_id, message);
+                });
+                None
+            }
+
+            ClientMessage::JoinCommunitasCall {
+                call_id,
+                message_id,
+            } => {
+                if !self.state.communitas_enabled() {
+                    return Some(ServerMessage::CommunitasCallResult {
+                        operation: "join".to_string(),
+                        success: false,
+                        call_id: None,
+                        error: Some("Communitas not configured; use legacy signaling".to_string()),
+                        message_id,
+                    });
+                }
+
+                // Spawn async task to join the call and send result
+                let state = self.state.clone();
+                let peer_id = self.peer_id.clone();
+                let session_id = self.session_id.clone();
+                let call_id_clone = call_id.clone();
+                tokio::spawn(async move {
+                    let result = state
+                        .join_communitas_call_async(&session_id, &peer_id, &call_id_clone)
+                        .await;
+                    let message = match result {
+                        Ok(()) => ServerMessage::CommunitasCallResult {
+                            operation: "join".to_string(),
+                            success: true,
+                            call_id: Some(call_id_clone),
+                            error: None,
+                            message_id,
+                        },
+                        Err(e) => ServerMessage::CommunitasCallResult {
+                            operation: "join".to_string(),
+                            success: false,
+                            call_id: Some(call_id_clone),
+                            error: Some(e),
+                            message_id,
+                        },
+                    };
+                    state.send_to_peer(&peer_id, message);
+                });
+                None
+            }
+
+            ClientMessage::LeaveCommunitasCall { message_id } => {
+                if !self.state.communitas_enabled() {
+                    return Some(ServerMessage::CommunitasCallResult {
+                        operation: "leave".to_string(),
+                        success: false,
+                        call_id: None,
+                        error: Some("Communitas not configured; use legacy signaling".to_string()),
+                        message_id,
+                    });
+                }
+
+                // Spawn async task to leave the call and send result
+                let state = self.state.clone();
+                let peer_id = self.peer_id.clone();
+                let session_id = self.session_id.clone();
+                tokio::spawn(async move {
+                    let result = state
+                        .leave_communitas_call_async(&session_id, &peer_id)
+                        .await;
+                    let message = match result {
+                        Ok(()) => ServerMessage::CommunitasCallResult {
+                            operation: "leave".to_string(),
+                            success: true,
+                            call_id: None,
+                            error: None,
+                            message_id,
+                        },
+                        Err(e) => ServerMessage::CommunitasCallResult {
+                            operation: "leave".to_string(),
+                            success: false,
+                            call_id: None,
+                            error: Some(e),
+                            message_id,
+                        },
+                    };
+                    state.send_to_peer(&peer_id, message);
+                });
                 None
             }
         }
@@ -1132,6 +1927,7 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
         version: env!("CARGO_PKG_VERSION").to_string(),
         session_id: client.session_id().to_string(),
         timestamp: current_timestamp(),
+        legacy_signaling: Some(state.legacy_signaling_enabled()),
     };
 
     if let Ok(json) = serde_json::to_string(&welcome) {
@@ -1156,6 +1952,20 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
     // Send initial scene state
     let scene_update = client.state.get_scene_update(client.session_id());
     if let Ok(json) = serde_json::to_string(&scene_update) {
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            state.unregister_peer(&peer_id);
+            return;
+        }
+    }
+
+    // Send initial call state snapshot
+    let call_snapshot = state.call_snapshot(client.session_id());
+    let call_message = ServerMessage::CallState {
+        session_id: client.session_id().to_string(),
+        call_id: call_snapshot.call_id,
+        participants: call_snapshot.participants,
+    };
+    if let Ok(json) = serde_json::to_string(&call_message) {
         if sender.send(Message::Text(json.into())).await.is_err() {
             state.unregister_peer(&peer_id);
             return;
@@ -1432,10 +2242,12 @@ mod tests {
             version: "1.0.0".to_string(),
             session_id: "default".to_string(),
             timestamp: 12345,
+            legacy_signaling: Some(true),
         };
         let json = serde_json::to_string(&msg).expect("should serialize");
         assert!(json.contains("welcome"));
         assert!(json.contains("1.0.0"));
+        assert!(json.contains("legacy_signaling"));
     }
 
     #[test]
@@ -1668,13 +2480,8 @@ mod tests {
         ];
 
         let result = state.process_queue("default", operations);
-
-        match result {
-            ServerMessage::SyncResult { synced_count, .. } => {
-                assert_eq!(synced_count, 2);
-            }
-            _ => panic!("Expected SyncResult"),
-        }
+        assert_eq!(result.processed_count, 2);
+        assert_eq!(result.failed_count, 0);
 
         let scene = state.get_scene("default").expect("should have scene");
         assert_eq!(scene.element_count(), 2);
@@ -2040,6 +2847,33 @@ mod tests {
     }
 
     #[test]
+    fn test_server_message_serialize_call_state() {
+        let msg = ServerMessage::CallState {
+            session_id: "default".to_string(),
+            call_id: Some("call-xyz".to_string()),
+            participants: vec!["peer-a".to_string(), "peer-b".to_string()],
+        };
+        let json = serde_json::to_string(&msg).expect("should serialize");
+        assert!(json.contains("call_state"));
+        assert!(json.contains("call-xyz"));
+        assert!(json.contains("peer-a"));
+    }
+
+    #[test]
+    fn test_call_snapshot_tracks_participants() {
+        let state = SyncState::new();
+        state.add_call_participant("default", "peer-a");
+        state.add_call_participant("default", "peer-b");
+        state.set_call_metadata("default", "call-123".to_string(), "default".to_string());
+
+        let snapshot = state.call_snapshot("default");
+        assert_eq!(snapshot.call_id, Some("call-123".to_string()));
+        assert_eq!(snapshot.participants.len(), 2);
+        assert!(snapshot.participants.contains(&"peer-a".to_string()));
+        assert!(snapshot.participants.contains(&"peer-b".to_string()));
+    }
+
+    #[test]
     fn test_server_message_serialize_call_ended() {
         let msg = ServerMessage::CallEnded {
             from_peer_id: "ender-123".to_string(),
@@ -2069,7 +2903,7 @@ mod tests {
         // StartCall returns error when target peer not in same session
         let response = client.handle_message(ClientMessage::StartCall {
             target_peer_id: "peer-1".to_string(),
-            session_id: "test".to_string(),
+            session_id: "default".to_string(),
         });
         assert!(response.is_some());
         match response.unwrap() {
