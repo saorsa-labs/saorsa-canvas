@@ -50,27 +50,33 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p canvas-server
 
       - name: Build WASM
-        run: |
-          cd canvas-app
-          wasm-pack build --target web --release
+        working-directory: canvas-app
+        run: wasm-pack build --target web --release
 
       - name: Get version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Debug build artifacts
+        run: |
+          echo "=== Checking target directory ==="
+          ls -la target/${{ matrix.target }}/release/ | head -20 || echo "Directory not found"
+          echo "=== Checking canvas-app/pkg ==="
+          ls -la canvas-app/pkg/ || echo "Directory not found"
 
       - name: Package release
         run: |
           mkdir -p staging
 
           # Copy binary
-          cp target/${{ matrix.target }}/release/canvas-server staging/
+          cp $GITHUB_WORKSPACE/target/${{ matrix.target }}/release/canvas-server staging/
 
           # Copy web assets
-          cp -r web staging/
+          cp -r $GITHUB_WORKSPACE/web staging/
 
           # Copy WASM build output
           mkdir -p staging/web/pkg
-          cp -r canvas-app/pkg/* staging/web/pkg/
+          cp -r $GITHUB_WORKSPACE/canvas-app/pkg/* staging/web/pkg/
 
           # Create tarball
           cd staging
