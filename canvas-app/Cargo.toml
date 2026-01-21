@@ -18,7 +18,8 @@ default = []
 
 [dependencies]
 # Core canvas types and renderer
-canvas-core = { path = "../canvas-core" }
+# Enable wasm feature for proper UUID generation in browser (uses crypto.getRandomValues)
+canvas-core = { path = "../canvas-core", features = ["wasm"] }
 # Note: charts and images features disabled for WASM (plotters/image crates don't support wasm32)
 canvas-renderer = { path = "../canvas-renderer", default-features = false, features = ["wasm"] }
 
@@ -55,5 +56,5 @@ console_error_panic_hook.workspace = true
 # Error handling
 thiserror.workspace = true
 
-# UUID - needs js feature for WASM
-uuid = { workspace = true, features = ["js"] }
+# UUID - only used for parsing IDs (js feature comes via canvas-core's wasm feature)
+uuid.workspace = true

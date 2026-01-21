@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["std"]
 std = []
+# uuid/js enables crypto.getRandomValues() for UUID generation in browsers
 wasm = ["wasm-bindgen", "web-sys", "js-sys", "console_error_panic_hook", "uuid/js"]
 
 [dependencies]
