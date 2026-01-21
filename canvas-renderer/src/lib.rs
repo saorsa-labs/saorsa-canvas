@@ -30,6 +30,8 @@ pub mod quilt;
 pub mod spatial;
 #[cfg(feature = "images")]
 pub mod texture_cache;
+#[cfg(feature = "gpu")]
+pub mod video;
 
 pub use backend::RenderBackend;
 pub use error::{RenderError, RenderResult};
@@ -38,6 +40,10 @@ pub use holographic::{
 };
 pub use quilt::{LookingGlassPreset, Quilt, QuiltRenderSettings, QuiltRenderTarget, QuiltView};
 pub use spatial::{Camera, HolographicConfig, Mat4, QuiltRenderInfo, Vec3};
+#[cfg(feature = "gpu")]
+pub use video::{
+    VideoFrameData, VideoTextureEntry, VideoTextureError, VideoTextureManager, VideoTextureResult,
+};
 
 use canvas_core::Scene;
 

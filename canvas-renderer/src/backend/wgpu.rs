@@ -109,6 +109,8 @@ pub struct WgpuBackend {
     sampler: wgpu::Sampler,
     /// Cached textures by element ID.
     texture_cache: HashMap<String, CachedTexture>,
+    /// Cached video textures by stream ID.
+    video_textures: HashMap<String, CachedTexture>,
     width: u32,
     height: u32,
     background_color: wgpu::Color,
@@ -238,6 +240,7 @@ impl WgpuBackend {
             textured_bind_group_layout,
             sampler,
             texture_cache: HashMap::new(),
+            video_textures: HashMap::new(),
             width,
             height,
             background_color: wgpu::Color {
@@ -301,6 +304,7 @@ impl WgpuBackend {
             textured_bind_group_layout,
             sampler,
             texture_cache: HashMap::new(),
+            video_textures: HashMap::new(),
             width: 800,
             height: 600,
             background_color: wgpu::Color {
@@ -444,6 +448,7 @@ impl WgpuBackend {
             textured_bind_group_layout,
             sampler,
             texture_cache: HashMap::new(),
+            video_textures: HashMap::new(),
             width,
             height,
             background_color: wgpu::Color {
@@ -1140,6 +1145,106 @@ impl WgpuBackend {
         Ok(())
     }
 
+    /// Render a video element to a texture, using placeholder if stream not available.
+    ///
+    /// For video elements, we check if a video texture exists for the `stream_id`.
+    /// If not, we create a placeholder texture. The actual video frames are
+    /// uploaded separately via `update_video_frame()`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_video_texture(&mut self, element: &Element, stream_id: &str) -> RenderResult<()> {
+        let key = element.id.to_string();
+
+        // Skip if already cached
+        if self.texture_cache.contains_key(&key) {
+            return Ok(());
+        }
+
+        // Check if we have a video texture for this stream
+        let video_key = format!("video:{stream_id}");
+        if self.video_textures.contains_key(&video_key) {
+            tracing::debug!(
+                "Video stream {stream_id} has cached texture, using placeholder for now"
+            );
+        }
+
+        // Create placeholder texture for video (dark gray)
+        let width = element.transform.width.max(1.0) as u32;
+        let height = element.transform.height.max(1.0) as u32;
+        let placeholder = crate::image::create_solid_color(width, height, 32, 32, 32, 255);
+
+        // Create GPU texture
+        let label = format!("Video: {key}");
+        let cached = self.texture_from_rgba(
+            &placeholder.data,
+            placeholder.width,
+            placeholder.height,
+            &label,
+        )?;
+        self.texture_cache.insert(key, cached);
+
+        tracing::debug!(
+            "Created video placeholder texture {}x{} for stream {stream_id}",
+            width,
+            height
+        );
+
+        Ok(())
+    }
+
+    /// Update a video frame for a specific stream.
+    ///
+    /// Call this when new video frame data is available from a WebRTC stream
+    /// or media playback. The frame data should be RGBA format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the texture cannot be created.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn update_video_frame(
+        &mut self,
+        stream_id: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> RenderResult<()> {
+        let expected_size = (width as usize) * (height as usize) * 4;
+        if rgba_data.len() != expected_size {
+            return Err(RenderError::Frame(format!(
+                "Invalid video frame data size: expected {expected_size}, got {}",
+                rgba_data.len()
+            )));
+        }
+
+        let video_key = format!("video:{stream_id}");
+        let label = format!("Video Stream: {stream_id}");
+
+        let cached = self.texture_from_rgba(rgba_data, width, height, &label)?;
+        self.video_textures.insert(video_key, cached);
+
+        tracing::trace!(
+            "Updated video frame {}x{} for stream {stream_id}",
+            width,
+            height
+        );
+
+        Ok(())
+    }
+
+    /// Remove a video stream texture.
+    ///
+    /// Call this when a video stream ends.
+    pub fn remove_video_stream(&mut self, stream_id: &str) {
+        let video_key = format!("video:{stream_id}");
+        self.video_textures.remove(&video_key);
+        tracing::debug!("Removed video stream texture: {stream_id}");
+    }
+
+    /// Clear all video stream textures.
+    pub fn clear_video_textures(&mut self) {
+        self.video_textures.clear();
+        tracing::debug!("Cleared all video textures");
+    }
+
     /// Get the display color for an element based on its kind.
     fn get_element_color(element: &Element) -> [f32; 4] {
         // If selected, use selection color
@@ -1225,6 +1330,11 @@ impl WgpuBackend {
                 ElementKind::Image { src, .. } => {
                     if let Err(e) = self.render_image_texture(element, src) {
                         tracing::warn!("Failed to render image texture: {e}");
+                    }
+                }
+                ElementKind::Video { stream_id, .. } => {
+                    if let Err(e) = self.render_video_texture(element, stream_id) {
+                        tracing::warn!("Failed to render video texture: {e}");
                     }
                 }
                 _ => {}
