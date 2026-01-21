@@ -1,0 +1,20 @@
+[Unit]
+Description=Saorsa Canvas - AI-native visual interface
+Documentation=https://github.com/saorsa-labs/saorsa-canvas
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__INSTALL_DIR__/saorsa-canvas
+Environment=CANVAS_PORT=9473
+Environment=CANVAS_WEB_DIR=__DATA_DIR__/web
+WorkingDirectory=__DATA_DIR__
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=append:__DATA_DIR__/logs/stdout.log
+StandardError=append:__DATA_DIR__/logs/stderr.log
+
+[Install]
+WantedBy=default.target
