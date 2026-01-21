@@ -56,8 +56,5 @@ console_error_panic_hook.workspace = true
 # Error handling
 thiserror.workspace = true
 
-# UUID - only used for parsing IDs (Uuid::parse_str), NOT generation (Uuid::new_v4)
-# WARNING: Do NOT use Uuid::new_v4() here without enabling uuid/js feature directly.
-# The js feature comes transitively via canvas-core's wasm feature, but relying on that
-# for generation would be fragile. If you need to generate UUIDs, use canvas-core.
+# UUID - for parsing only. Do NOT call Uuid::new_v4() here; use canvas-core for generation.
 uuid.workspace = true

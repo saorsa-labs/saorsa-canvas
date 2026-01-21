@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use crate::{CanvasState, Scene, SceneDocument};
 
 /// Initialize the canvas WASM module.
-#[wasm_bindgen(start)]
+// Initialization moved to canvas-app entry point
 pub fn init() {
     // Set up panic hook for better error messages
     #[cfg(feature = "wasm")]
@@ -106,9 +106,7 @@ mod tests {
     #[test]
     fn get_scene_json_returns_valid_json() {
         let canvas = WasmCanvas::new();
-        let result = canvas.get_scene_json();
-        assert!(result.is_ok(), "get_scene_json should succeed");
-        let json = result.expect("already checked");
+        let json = canvas.get_scene_json().expect("get_scene_json should succeed");
         let parsed: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&json);
         assert!(parsed.is_ok(), "Scene JSON should be valid");
     }
@@ -119,7 +117,9 @@ mod tests {
         let scene_json = r#"{"elements":{},"root_elements":[],"selected":[],"viewport_width":1024.0,"viewport_height":768.0,"zoom":1.5,"pan_x":10.0,"pan_y":20.0}"#;
         let result = canvas.update_scene_from_json(scene_json);
         assert!(result.is_ok());
-        let updated_json = canvas.get_scene_json().expect("serialization should succeed");
+        let updated_json = canvas
+            .get_scene_json()
+            .expect("serialization should succeed");
         assert!(updated_json.contains("1024"));
     }
 
@@ -143,7 +143,9 @@ mod tests {
         let doc_json = r#"{"session_id":"test","viewport":{"width":1920.0,"height":1080.0,"zoom":2.0,"pan_x":0.0,"pan_y":0.0},"elements":[],"timestamp":123}"#;
         let result = canvas.apply_scene_document(doc_json);
         assert!(result.is_ok());
-        let scene_json = canvas.get_scene_json().expect("serialization should succeed");
+        let scene_json = canvas
+            .get_scene_json()
+            .expect("serialization should succeed");
         assert!(scene_json.contains("1920"));
     }
 
@@ -179,11 +181,22 @@ mod tests {
     #[test]
     fn scene_json_roundtrip() {
         let canvas1 = WasmCanvas::new();
-        let json1 = canvas1.get_scene_json().expect("serialization should succeed");
+        let json1 = canvas1
+            .get_scene_json()
+            .expect("serialization should succeed");
         let mut canvas2 = WasmCanvas::new();
         let result = canvas2.update_scene_from_json(&json1);
         assert!(result.is_ok());
-        let json2 = canvas2.get_scene_json().expect("serialization should succeed");
+        let json2 = canvas2
+            .get_scene_json()
+            .expect("serialization should succeed");
         assert_eq!(json1, json2);
+    }
+
+    #[test]
+    fn init_can_be_called_multiple_times() {
+        // init() is idempotent - console_error_panic_hook::set_once() handles this
+        init();
+        init(); // Should not panic on repeated calls
     }
 }
