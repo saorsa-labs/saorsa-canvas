@@ -34,10 +34,13 @@ impl WasmCanvas {
     }
 
     /// Get the current scene as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if serialization fails.
     #[wasm_bindgen(js_name = getSceneJson)]
-    #[must_use]
-    pub fn get_scene_json(&self) -> String {
-        serde_json::to_string(&self.scene).unwrap_or_default()
+    pub fn get_scene_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.scene).map_err(|e| e.to_string())
     }
 
     /// Update the scene from JSON.
@@ -103,8 +106,10 @@ mod tests {
     #[test]
     fn get_scene_json_returns_valid_json() {
         let canvas = WasmCanvas::new();
-        let json = canvas.get_scene_json();
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json);
+        let result = canvas.get_scene_json();
+        assert!(result.is_ok(), "get_scene_json should succeed");
+        let json = result.expect("already checked");
+        let parsed: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&json);
         assert!(parsed.is_ok(), "Scene JSON should be valid");
     }
 
@@ -114,7 +119,7 @@ mod tests {
         let scene_json = r#"{"elements":{},"root_elements":[],"selected":[],"viewport_width":1024.0,"viewport_height":768.0,"zoom":1.5,"pan_x":10.0,"pan_y":20.0}"#;
         let result = canvas.update_scene_from_json(scene_json);
         assert!(result.is_ok());
-        let updated_json = canvas.get_scene_json();
+        let updated_json = canvas.get_scene_json().expect("serialization should succeed");
         assert!(updated_json.contains("1024"));
     }
 
@@ -138,7 +143,7 @@ mod tests {
         let doc_json = r#"{"session_id":"test","viewport":{"width":1920.0,"height":1080.0,"zoom":2.0,"pan_x":0.0,"pan_y":0.0},"elements":[],"timestamp":123}"#;
         let result = canvas.apply_scene_document(doc_json);
         assert!(result.is_ok());
-        let scene_json = canvas.get_scene_json();
+        let scene_json = canvas.get_scene_json().expect("serialization should succeed");
         assert!(scene_json.contains("1920"));
     }
 
@@ -174,11 +179,11 @@ mod tests {
     #[test]
     fn scene_json_roundtrip() {
         let canvas1 = WasmCanvas::new();
-        let json1 = canvas1.get_scene_json();
+        let json1 = canvas1.get_scene_json().expect("serialization should succeed");
         let mut canvas2 = WasmCanvas::new();
         let result = canvas2.update_scene_from_json(&json1);
         assert!(result.is_ok());
-        let json2 = canvas2.get_scene_json();
+        let json2 = canvas2.get_scene_json().expect("serialization should succeed");
         assert_eq!(json1, json2);
     }
 }
