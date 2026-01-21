@@ -75,7 +75,7 @@ tar -xzf dist/saorsa-canvas-vX.Y.Z-TARGET.tar.gz -C /tmp/saorsa-test
 
 # Run
 cd /tmp/saorsa-test
-./canvas-server
+./saorsa-canvas
 
 # Open browser to http://localhost:9473
 ```

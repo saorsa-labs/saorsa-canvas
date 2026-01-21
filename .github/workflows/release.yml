@@ -57,19 +57,12 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Debug build artifacts
-        run: |
-          echo "=== Checking target directory ==="
-          ls -la target/${{ matrix.target }}/release/ | head -20 || echo "Directory not found"
-          echo "=== Checking canvas-app/pkg ==="
-          ls -la canvas-app/pkg/ || echo "Directory not found"
-
       - name: Package release
         run: |
           mkdir -p staging
 
-          # Copy binary
-          cp $GITHUB_WORKSPACE/target/${{ matrix.target }}/release/canvas-server staging/
+          # Copy binary (named saorsa-canvas per Cargo.toml [[bin]])
+          cp $GITHUB_WORKSPACE/target/${{ matrix.target }}/release/saorsa-canvas staging/
 
           # Copy web assets
           cp -r $GITHUB_WORKSPACE/web staging/
@@ -129,7 +122,7 @@ jobs:
             Extract and run:
             ```bash
             tar -xzf saorsa-canvas-*.tar.gz
-            ./canvas-server
+            ./saorsa-canvas
             ```
 
             Then open http://localhost:9473 in your browser.

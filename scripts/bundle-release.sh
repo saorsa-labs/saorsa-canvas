@@ -72,7 +72,7 @@ mkdir -p "$OUTPUT_DIR/staging"
 # Step 1: Build server binary
 echo "==> Building server binary for $TARGET..."
 cd "$PROJECT_ROOT"
-cargo build --release --target "$TARGET" -p canvas-server
+cargo build --release --target "$TARGET" -p saorsa-canvas
 
 # Step 2: Build WASM
 echo "==> Building WASM..."
@@ -85,7 +85,7 @@ wasm-pack build --target web --release
 
 # Step 3: Copy binary
 echo "==> Copying binary..."
-cp "$PROJECT_ROOT/target/$TARGET/release/canvas-server" "$OUTPUT_DIR/staging/"
+cp "$PROJECT_ROOT/target/$TARGET/release/saorsa-canvas" "$OUTPUT_DIR/staging/"
 
 # Step 4: Copy web assets
 echo "==> Copying web assets..."
@@ -111,4 +111,4 @@ echo "Archive: $OUTPUT_DIR/$ARCHIVE_NAME"
 echo ""
 echo "Test locally:"
 echo "  tar -xzf $OUTPUT_DIR/$ARCHIVE_NAME -C /tmp/saorsa-test"
-echo "  cd /tmp/saorsa-test && ./canvas-server"
+echo "  cd /tmp/saorsa-test && ./saorsa-canvas"
