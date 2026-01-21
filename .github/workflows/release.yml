@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build server binary
+        run: cargo build --release --target ${{ matrix.target }} -p canvas-server
+
+      - name: Build WASM
+        run: |
+          cd canvas-app
+          wasm-pack build --target web --release
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Package release
+        run: |
+          mkdir -p staging
+
+          # Copy binary
+          cp target/${{ matrix.target }}/release/canvas-server staging/
+
+          # Copy web assets
+          cp -r web staging/
+
+          # Copy WASM build output
+          mkdir -p staging/web/pkg
+          cp -r canvas-app/pkg/* staging/web/pkg/
+
+          # Create tarball
+          cd staging
+          tar -czvf ../saorsa-canvas-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: saorsa-canvas-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
+          path: saorsa-canvas-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display artifacts
+        run: ls -la artifacts/*/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Saorsa Canvas ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, 'alpha') || contains(steps.version.outputs.VERSION, 'beta') }}
+          generate_release_notes: true
+          files: artifacts/*/*.tar.gz
+          body: |
+            ## Installation
+
+            Download the appropriate archive for your platform:
+            - **macOS (Apple Silicon)**: `saorsa-canvas-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz`
+            - **macOS (Intel)**: `saorsa-canvas-${{ steps.version.outputs.VERSION }}-x86_64-apple-darwin.tar.gz`
+            - **Linux (x64)**: `saorsa-canvas-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz`
+
+            Extract and run:
+            ```bash
+            tar -xzf saorsa-canvas-*.tar.gz
+            ./canvas-server
+            ```
+
+            Then open http://localhost:9473 in your browser.
+
+            ## What's Changed

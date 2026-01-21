@@ -332,6 +332,7 @@ impl WgpuBackend {
     ///
     /// Returns an error if GPU initialization fails.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_lines)]
     pub async fn from_window_async(window: Arc<Window>) -> RenderResult<Self> {
         let size = window.inner_size();
         let width = size.width;
@@ -385,7 +386,14 @@ impl WgpuBackend {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| RenderError::GpuInit("No surface formats available".to_string()))?;
+
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or_else(|| RenderError::GpuInit("No alpha modes available".to_string()))?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -393,7 +401,7 @@ impl WgpuBackend {
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -848,7 +856,14 @@ impl WgpuBackend {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| RenderError::GpuInit("No surface formats available".to_string()))?;
+
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or_else(|| RenderError::GpuInit("No alpha modes available".to_string()))?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -856,7 +871,7 @@ impl WgpuBackend {
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

@@ -15,6 +15,10 @@ edition = "2021"
 authors = ["Saorsa Labs <dev@saorsa.io>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/saorsa-labs/saorsa-canvas"
+homepage = "https://saorsa.ai"
+description = "AI-native visual interface layer for Claude Code"
+keywords = ["canvas", "ai", "mcp", "claude", "visualization"]
+categories = ["visualization", "gui", "development-tools"]
 
 [workspace.dependencies]
 # Async runtime

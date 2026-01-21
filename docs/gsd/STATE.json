@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "project": "saorsa-canvas",
+  "active": true,
+  "milestone": {
+    "number": 3,
+    "name": "Beta Distribution"
+  },
+  "phase": {
+    "number": 1,
+    "name": "Release Workflow",
+    "status": "pending"
+  },
+  "progress": {
+    "total_tasks": 5,
+    "completed_tasks": 0,
+    "current_task": null
+  },
+  "status": "initialized",
+  "last_review": null,
+  "last_updated": "2026-01-21T00:00:00Z"
+}

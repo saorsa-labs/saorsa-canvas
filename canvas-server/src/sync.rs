@@ -448,13 +448,13 @@ pub enum QueuedOperation {
 }
 
 impl QueuedOperation {
-    /// Get the type of this operation as a string.
+    /// Get the type of this operation.
     #[must_use]
-    pub fn operation_type(&self) -> &'static str {
+    pub fn operation_type(&self) -> OperationType {
         match self {
-            Self::Add { .. } => "add",
-            Self::Update { .. } => "update",
-            Self::Remove { .. } => "remove",
+            Self::Add { .. } => OperationType::Add,
+            Self::Update { .. } => OperationType::Update,
+            Self::Remove { .. } => OperationType::Remove,
         }
     }
 
@@ -468,14 +468,38 @@ impl QueuedOperation {
     }
 }
 
+/// Type of sync operation.
+///
+/// Provides type-safe representation of operation types rather than using strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationType {
+    /// Add a new element.
+    Add,
+    /// Update an existing element.
+    Update,
+    /// Remove an element.
+    Remove,
+}
+
+impl std::fmt::Display for OperationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Add => write!(f, "add"),
+            Self::Update => write!(f, "update"),
+            Self::Remove => write!(f, "remove"),
+        }
+    }
+}
+
 /// Information about a failed sync operation sent to clients.
 ///
 /// This struct provides minimal but useful details about operations
 /// that failed during queue processing, enabling client-side reconciliation.
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedOperationInfo {
-    /// Type of operation that failed (add, update, remove).
-    pub operation: String,
+    /// Type of operation that failed.
+    pub operation: OperationType,
     /// Element ID involved in the failed operation, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
@@ -491,7 +515,7 @@ impl FailedOperationInfo {
     #[must_use]
     pub fn from_failed_op(op: &QueuedOperation, error: &str) -> Self {
         Self {
-            operation: op.operation_type().to_string(),
+            operation: op.operation_type(),
             element_id: op.element_id().map(String::from),
             error: error.to_string(),
         }
@@ -983,9 +1007,19 @@ impl SyncState {
         // Update call metadata
         self.set_call_metadata(session_id, result.call_id.clone(), result.entity_id);
         // Add this peer as participant
-        if let Ok(mut calls) = self.active_calls.write() {
-            if let Some(call) = calls.get_mut(session_id) {
-                call.participants.insert(peer_id.to_string());
+        match self.active_calls.write() {
+            Ok(mut calls) => {
+                if let Some(call) = calls.get_mut(session_id) {
+                    call.participants.insert(peer_id.to_string());
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    peer_id = %peer_id,
+                    "Failed to add participant to call: lock poisoned ({})",
+                    e
+                );
             }
         }
         self.broadcast_call_state(session_id);
@@ -1020,12 +1054,23 @@ impl SyncState {
         }
 
         // Add participant to local state
-        if let Ok(mut calls) = self.active_calls.write() {
-            let entry = calls
-                .entry(session_id.to_string())
-                .or_insert_with(|| ActiveCall::new(session_id));
-            entry.call_id = Some(call_id.to_string());
-            entry.participants.insert(peer_id.to_string());
+        match self.active_calls.write() {
+            Ok(mut calls) => {
+                let entry = calls
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| ActiveCall::new(session_id));
+                entry.call_id = Some(call_id.to_string());
+                entry.participants.insert(peer_id.to_string());
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    peer_id = %peer_id,
+                    call_id = %call_id,
+                    "Failed to add participant after join: lock poisoned ({})",
+                    e
+                );
+            }
         }
         self.broadcast_call_state(session_id);
 
@@ -1072,13 +1117,24 @@ impl SyncState {
 
         // Remove participant from local state
         let mut should_end = false;
-        if let Ok(mut calls) = self.active_calls.write() {
-            if let Some(call) = calls.get_mut(session_id) {
-                call.participants.remove(peer_id);
-                if call.participants.is_empty() {
-                    should_end = true;
-                    calls.remove(session_id);
+        match self.active_calls.write() {
+            Ok(mut calls) => {
+                if let Some(call) = calls.get_mut(session_id) {
+                    call.participants.remove(peer_id);
+                    if call.participants.is_empty() {
+                        should_end = true;
+                        calls.remove(session_id);
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    peer_id = %peer_id,
+                    call_id = %call_id,
+                    "Failed to remove participant on leave: lock poisoned ({})",
+                    e
+                );
             }
         }
         self.broadcast_call_state(session_id);
@@ -1498,8 +1554,15 @@ impl SyncState {
             message,
             origin,
         };
-        // Ignore send errors (no receivers is okay)
-        let _ = self.event_tx.send(event);
+        if let Err(e) = self.event_tx.send(event) {
+            // No receivers is expected during startup or when no clients are connected.
+            // Log at debug level to aid troubleshooting without spamming logs.
+            tracing::debug!(
+                session_id = %session_id,
+                "Broadcast skipped: no receivers ({})",
+                e
+            );
+        }
     }
 }
 
@@ -2082,8 +2145,15 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
         legacy_signaling: Some(state.legacy_signaling_enabled()),
     };
 
-    if let Ok(json) = serde_json::to_string(&welcome) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
+    match serde_json::to_string(&welcome) {
+        Ok(json) => {
+            if sender.send(Message::Text(json.into())).await.is_err() {
+                state.unregister_peer(&peer_id);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::error!(peer_id = %peer_id, "Failed to serialize welcome message: {}", e);
             state.unregister_peer(&peer_id);
             return;
         }
@@ -2094,8 +2164,15 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
         peer_id: peer_id.clone(),
     };
 
-    if let Ok(json) = serde_json::to_string(&peer_assigned) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
+    match serde_json::to_string(&peer_assigned) {
+        Ok(json) => {
+            if sender.send(Message::Text(json.into())).await.is_err() {
+                state.unregister_peer(&peer_id);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::error!(peer_id = %peer_id, "Failed to serialize peer_assigned message: {}", e);
             state.unregister_peer(&peer_id);
             return;
         }
@@ -2103,8 +2180,15 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
 
     // Send initial scene state
     let scene_update = client.state.get_scene_update(client.session_id());
-    if let Ok(json) = serde_json::to_string(&scene_update) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
+    match serde_json::to_string(&scene_update) {
+        Ok(json) => {
+            if sender.send(Message::Text(json.into())).await.is_err() {
+                state.unregister_peer(&peer_id);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::error!(peer_id = %peer_id, "Failed to serialize scene_update message: {}", e);
             state.unregister_peer(&peer_id);
             return;
         }
@@ -2117,8 +2201,15 @@ pub async fn handle_sync_socket(socket: WebSocket, state: SyncState) {
         call_id: call_snapshot.call_id,
         participants: call_snapshot.participants,
     };
-    if let Ok(json) = serde_json::to_string(&call_message) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
+    match serde_json::to_string(&call_message) {
+        Ok(json) => {
+            if sender.send(Message::Text(json.into())).await.is_err() {
+                state.unregister_peer(&peer_id);
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::error!(peer_id = %peer_id, "Failed to serialize call_state message: {}", e);
             state.unregister_peer(&peer_id);
             return;
         }
@@ -3139,5 +3230,218 @@ mod tests {
         limiter.last_refill = Instant::now() - Duration::from_secs(100);
         limiter.refill();
         assert!((limiter.tokens - 5.0).abs() < f64::EPSILON);
+    }
+
+    // Tests for OperationType, FailedOperationInfo, and ProcessQueueResult
+
+    #[test]
+    fn test_operation_type_display() {
+        assert_eq!(OperationType::Add.to_string(), "add");
+        assert_eq!(OperationType::Update.to_string(), "update");
+        assert_eq!(OperationType::Remove.to_string(), "remove");
+    }
+
+    #[test]
+    fn test_operation_type_serialization() {
+        let json = serde_json::to_string(&OperationType::Add).expect("should serialize");
+        assert_eq!(json, "\"add\"");
+
+        let json = serde_json::to_string(&OperationType::Update).expect("should serialize");
+        assert_eq!(json, "\"update\"");
+
+        let json = serde_json::to_string(&OperationType::Remove).expect("should serialize");
+        assert_eq!(json, "\"remove\"");
+    }
+
+    #[test]
+    fn test_queued_operation_type() {
+        let add_op = QueuedOperation::Add {
+            element: ElementDocument {
+                id: "test".to_string(),
+                kind: ElementKind::Text {
+                    content: "test".to_string(),
+                    font_size: 16.0,
+                    color: "#000".to_string(),
+                },
+                transform: Transform::default(),
+                interactive: true,
+                selected: false,
+            },
+            timestamp: 100,
+        };
+        assert_eq!(add_op.operation_type(), OperationType::Add);
+
+        let update_op = QueuedOperation::Update {
+            id: "test".to_string(),
+            changes: serde_json::json!({}),
+            timestamp: 100,
+        };
+        assert_eq!(update_op.operation_type(), OperationType::Update);
+
+        let remove_op = QueuedOperation::Remove {
+            id: "test".to_string(),
+            timestamp: 100,
+        };
+        assert_eq!(remove_op.operation_type(), OperationType::Remove);
+    }
+
+    #[test]
+    fn test_failed_operation_info_from_add_op() {
+        let op = QueuedOperation::Add {
+            element: ElementDocument {
+                id: "elem-123".to_string(),
+                kind: ElementKind::Text {
+                    content: "test".to_string(),
+                    font_size: 16.0,
+                    color: "#000".to_string(),
+                },
+                transform: Transform::default(),
+                interactive: true,
+                selected: false,
+            },
+            timestamp: 100,
+        };
+
+        let info = FailedOperationInfo::from_failed_op(&op, "element already exists");
+        assert_eq!(info.operation, OperationType::Add);
+        assert_eq!(info.element_id, Some("elem-123".to_string()));
+        assert_eq!(info.error, "element already exists");
+    }
+
+    #[test]
+    fn test_failed_operation_info_from_remove_op() {
+        let op = QueuedOperation::Remove {
+            id: "elem-456".to_string(),
+            timestamp: 200,
+        };
+
+        let info = FailedOperationInfo::from_failed_op(&op, "element not found");
+        assert_eq!(info.operation, OperationType::Remove);
+        assert_eq!(info.element_id, Some("elem-456".to_string()));
+        assert_eq!(info.error, "element not found");
+    }
+
+    #[test]
+    fn test_failed_operation_info_serialization() {
+        let info = FailedOperationInfo {
+            operation: OperationType::Update,
+            element_id: Some("id-789".to_string()),
+            error: "conflict detected".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).expect("should serialize");
+        assert!(json.contains("\"operation\":\"update\""));
+        assert!(json.contains("\"element_id\":\"id-789\""));
+        assert!(json.contains("\"error\":\"conflict detected\""));
+    }
+
+    #[test]
+    fn test_failed_operation_info_skips_none_element_id() {
+        let info = FailedOperationInfo {
+            operation: OperationType::Add,
+            element_id: None,
+            error: "unknown error".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).expect("should serialize");
+        assert!(!json.contains("element_id"));
+    }
+
+    #[test]
+    fn test_process_queue_result_into_server_message() {
+        let op1 = QueuedOperation::Remove {
+            id: "e1".to_string(),
+            timestamp: 1,
+        };
+        let op2 = QueuedOperation::Update {
+            id: "e2".to_string(),
+            changes: serde_json::json!({}),
+            timestamp: 2,
+        };
+
+        let result = ProcessQueueResult {
+            processed_count: 5,
+            failed_count: 2,
+            failed_ops: vec![
+                (op1, "not found".to_string()),
+                (op2, "conflict".to_string()),
+            ],
+            timestamp: 12345,
+        };
+
+        let msg = result.into_server_message();
+        match msg {
+            ServerMessage::SyncResult {
+                synced_count,
+                conflict_count,
+                timestamp,
+                failed_operations,
+            } => {
+                assert_eq!(synced_count, 5);
+                assert_eq!(conflict_count, 2);
+                assert_eq!(timestamp, 12345);
+                assert_eq!(failed_operations.len(), 2);
+                assert_eq!(failed_operations[0].operation, OperationType::Remove);
+                assert_eq!(failed_operations[1].operation, OperationType::Update);
+            }
+            _ => panic!("Expected SyncResult"),
+        }
+    }
+
+    #[test]
+    fn test_process_queue_result_truncates_to_max_failures() {
+        let failed_ops: Vec<_> = (0..15)
+            .map(|i| {
+                (
+                    QueuedOperation::Remove {
+                        id: format!("e{}", i),
+                        timestamp: i,
+                    },
+                    "error".to_string(),
+                )
+            })
+            .collect();
+
+        let result = ProcessQueueResult {
+            processed_count: 0,
+            failed_count: 15,
+            failed_ops,
+            timestamp: 12345,
+        };
+
+        let msg = result.into_server_message();
+        match msg {
+            ServerMessage::SyncResult {
+                failed_operations, ..
+            } => {
+                assert_eq!(
+                    failed_operations.len(),
+                    FailedOperationInfo::MAX_FAILURES_IN_RESPONSE
+                );
+                assert_eq!(failed_operations.len(), 10);
+            }
+            _ => panic!("Expected SyncResult"),
+        }
+    }
+
+    #[test]
+    fn test_process_queue_with_failed_remove() {
+        let state = SyncState::new();
+
+        // Try to remove a non-existent element
+        let operations = vec![QueuedOperation::Remove {
+            id: "nonexistent-id".to_string(),
+            timestamp: 100,
+        }];
+
+        let result = state.process_queue("default", operations);
+        // The remove should fail since element doesn't exist
+        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(result.failed_ops.len(), 1);
+        assert_eq!(
+            result.failed_ops[0].0.operation_type(),
+            OperationType::Remove
+        );
     }
 }

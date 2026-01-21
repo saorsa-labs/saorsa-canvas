@@ -124,6 +124,16 @@ Saorsa Canvas implements emerging AI-UI standards:
 }
 ```
 
+## Communitas Networking & WebRTC
+
+When `COMMUNITAS_MCP_URL` (and optionally `COMMUNITAS_MCP_TOKEN`) are provided, the canvas server now:
+
+- Performs the `network_start` MCP call so the Communitas core dials into the saorsa-gossip (ant-quic) overlay and boots the saorsa-webrtc media stack. You can hint a preferred port via `COMMUNITAS_NETWORK_PORT`.
+- Mirrors Communitas WebRTC state into the canvas scene store and emits `call_state` broadcasts; the web status bar shows the active call ID and participant count.
+- Disables the legacy browser-to-browser WebRTC signaling path so that production traffic always flows through saorsa-webrtc over ant-quic. (Run without `COMMUNITAS_MCP_URL` to re-enable the legacy signaling flow for local experimentation.)
+
+This ensures every production deployment rides over the same secure transport used by the bootstrap nodes (`saorsa-2` through `saorsa-5`).
+
 ## Content Types
 
 | Type | Format | Rendering |

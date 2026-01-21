@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "project": "saorsa-canvas",
+  "active": true,
+  "milestone": {
+    "number": 1,
+    "name": "Initial Setup"
+  },
+  "phase": {
+    "number": 1,
+    "name": "Phase 1",
+    "status": "pending"
+  },
+  "progress": {
+    "total_tasks": 0,
+    "completed_tasks": 0,
+    "current_task": null
+  },
+  "status": "idle",
+  "last_updated": "2026-01-20T08:50:00Z",
+  "notes": "Project initialized for GSD tracking."
+}
