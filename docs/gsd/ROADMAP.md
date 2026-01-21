@@ -32,7 +32,7 @@
 *Make saorsa-canvas a downloadable, installable application for Claude Code beta testing*
 
 ### Phase 1: Release Workflow
-- **Status**: In Progress
+- **Status**: COMPLETED (v0.2.0-alpha.1 released)
 - **Tasks**:
   1. Create GitHub Actions release workflow (builds on v* tags)
   2. Asset bundling script for cross-platform releases

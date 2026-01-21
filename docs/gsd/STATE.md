@@ -74,8 +74,8 @@ Cut v0.2.0-beta.1 release and test end-to-end.
 
 ## Current Position
 - Milestone: M3 - Beta Distribution
-- Phase: 1 - Release Workflow
-- Tasks: Not started
+- Phase: 1 - Release Workflow (COMPLETED)
+- Phase 2 - Install Script (NEXT)
 
 ## Blockers
 - None currently
