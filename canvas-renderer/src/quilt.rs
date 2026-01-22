@@ -25,7 +25,10 @@
 //!         8 columns × 6 rows = 48 views
 //! ```
 
+use crate::backend::wgpu::WgpuBackend;
+use crate::error::RenderResult;
 use crate::spatial::{Camera, HolographicConfig};
+use canvas_core::Scene;
 use serde::{Deserialize, Serialize};
 
 /// A single view in the quilt.
@@ -119,6 +122,47 @@ impl Quilt {
             return 1.0;
         }
         self.total_width as f32 / self.total_height as f32
+    }
+
+    /// Render the quilt to a texture, composing all views.
+    ///
+    /// This method renders each view with its corresponding camera position
+    /// and viewport, then composes them into a single quilt texture that
+    /// can be sent to a Looking Glass display.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The wgpu rendering backend
+    /// * `scene` - The scene to render from each view
+    ///
+    /// # Returns
+    ///
+    /// A `QuiltRenderTarget` containing the composed RGBA pixel data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `RenderError` if:
+    /// - GPU texture creation fails
+    /// - View rendering fails
+    /// - Pixel readback fails
+    pub fn render(
+        &self,
+        backend: &mut WgpuBackend,
+        scene: &Scene,
+    ) -> RenderResult<QuiltRenderTarget> {
+        // Use the backend to render all views to a quilt texture
+        let pixels = backend.render_quilt_to_buffer(
+            self.total_width,
+            self.total_height,
+            &self.views,
+            scene,
+        )?;
+
+        Ok(QuiltRenderTarget {
+            width: self.total_width,
+            height: self.total_height,
+            pixels,
+        })
     }
 }
 
