@@ -25,9 +25,12 @@
 //!         8 columns × 6 rows = 48 views
 //! ```
 
+#[cfg(feature = "gpu")]
 use crate::backend::wgpu::WgpuBackend;
+#[cfg(feature = "gpu")]
 use crate::error::RenderResult;
 use crate::spatial::{Camera, HolographicConfig};
+#[cfg(feature = "gpu")]
 use canvas_core::Scene;
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +148,7 @@ impl Quilt {
     /// - GPU texture creation fails
     /// - View rendering fails
     /// - Pixel readback fails
+    #[cfg(feature = "gpu")]
     pub fn render(
         &self,
         backend: &mut WgpuBackend,

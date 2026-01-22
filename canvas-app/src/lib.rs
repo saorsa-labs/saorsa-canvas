@@ -36,7 +36,10 @@ use canvas_core::{
     CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, SceneDocument, TouchEvent,
     TouchPhase, TouchPoint, Transform,
 };
-use canvas_renderer::{BackendType, RenderBackend, RenderResult, Renderer, RendererConfig};
+use canvas_renderer::{
+    BackendType, Camera, HolographicConfig, HolographicRenderer, RenderBackend, RenderResult,
+    Renderer, RendererConfig, Vec3,
+};
 
 // Chart rendering is not available in WASM - always use placeholder
 // The chart module uses plotters which doesn't support wasm32
@@ -341,6 +344,12 @@ pub struct CanvasApp {
     frame_count: u64,
     renderer_state: RendererHandle,
     renderer: Renderer,
+    /// Holographic rendering configuration (None when not in holographic mode).
+    holographic_config: Option<HolographicConfig>,
+    /// Holographic renderer (lazily initialized).
+    holographic_renderer: Option<HolographicRenderer>,
+    /// Camera for holographic rendering.
+    holographic_camera: Camera,
 }
 
 #[wasm_bindgen]
@@ -398,6 +407,9 @@ impl CanvasApp {
             frame_count: 0,
             renderer_state,
             renderer,
+            holographic_config: None,
+            holographic_renderer: None,
+            holographic_camera: Camera::default(),
         })
     }
 
@@ -640,6 +652,269 @@ impl CanvasApp {
             .ok()
             .and_then(|state| state.video_frames.get(stream_id).map(|f| f.timestamp))
             .unwrap_or(0.0)
+    }
+
+    // ========================================================================
+    // Holographic Mode Methods
+    // ========================================================================
+
+    /// Enable holographic mode with a preset configuration.
+    ///
+    /// Supported presets: "portrait", "4k"
+    /// Pass an empty string or "off" to disable holographic mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the preset is not recognized.
+    #[wasm_bindgen(js_name = setHolographicConfig)]
+    pub fn set_holographic_config(&mut self, preset: &str) -> Result<(), JsValue> {
+        match preset.to_lowercase().as_str() {
+            "portrait" => {
+                let config = HolographicConfig::looking_glass_portrait();
+                self.holographic_renderer = Some(HolographicRenderer::new(config.clone()));
+                self.holographic_config = Some(config);
+                Ok(())
+            }
+            "4k" => {
+                let config = HolographicConfig::looking_glass_4k();
+                self.holographic_renderer = Some(HolographicRenderer::new(config.clone()));
+                self.holographic_config = Some(config);
+                Ok(())
+            }
+            "" | "off" | "none" | "disabled" => {
+                self.holographic_config = None;
+                self.holographic_renderer = None;
+                Ok(())
+            }
+            _ => Err(JsValue::from_str(&format!(
+                "Unknown holographic preset: '{preset}'. Use 'portrait', '4k', or 'off'"
+            ))),
+        }
+    }
+
+    /// Check if holographic mode is currently enabled.
+    #[wasm_bindgen(js_name = isHolographicMode)]
+    #[must_use]
+    pub fn is_holographic_mode(&self) -> bool {
+        self.holographic_config.is_some()
+    }
+
+    /// Get the quilt dimensions for the current holographic configuration.
+    ///
+    /// Returns a JS object: { width, height, views, columns, rows }
+    /// Returns null if holographic mode is not enabled.
+    #[wasm_bindgen(js_name = getQuiltDimensions)]
+    #[must_use]
+    pub fn get_quilt_dimensions(&self) -> JsValue {
+        match &self.holographic_config {
+            Some(config) => {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("width"),
+                    &JsValue::from_f64(f64::from(config.quilt_width())),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("height"),
+                    &JsValue::from_f64(f64::from(config.quilt_height())),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("views"),
+                    &JsValue::from_f64(f64::from(config.num_views)),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("columns"),
+                    &JsValue::from_f64(f64::from(config.quilt_columns)),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("rows"),
+                    &JsValue::from_f64(f64::from(config.quilt_rows)),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("viewWidth"),
+                    &JsValue::from_f64(f64::from(config.view_width)),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("viewHeight"),
+                    &JsValue::from_f64(f64::from(config.view_height)),
+                );
+                obj.into()
+            }
+            None => JsValue::NULL,
+        }
+    }
+
+    /// Render the current scene as a holographic quilt.
+    ///
+    /// Returns the quilt as RGBA pixel data (Vec<u8>).
+    /// The dimensions can be obtained from `getQuiltDimensions()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if holographic mode is not enabled.
+    #[wasm_bindgen(js_name = renderQuilt)]
+    pub fn render_quilt(&mut self) -> Result<Vec<u8>, JsValue> {
+        let renderer = self.holographic_renderer.as_mut().ok_or_else(|| {
+            JsValue::from_str("Holographic mode not enabled. Call setHolographicConfig() first.")
+        })?;
+
+        let result = renderer.render_quilt(&self.scene, &self.holographic_camera);
+        Ok(result.target.pixels)
+    }
+
+    /// Set the holographic camera position and target.
+    ///
+    /// # Arguments
+    ///
+    /// * `pos_x`, `pos_y`, `pos_z` - Camera position in world space
+    /// * `target_x`, `target_y`, `target_z` - Point the camera looks at
+    #[wasm_bindgen(js_name = setHolographicCamera)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_holographic_camera(
+        &mut self,
+        pos_x: f32,
+        pos_y: f32,
+        pos_z: f32,
+        target_x: f32,
+        target_y: f32,
+        target_z: f32,
+    ) {
+        self.holographic_camera = Camera {
+            position: Vec3::new(pos_x, pos_y, pos_z),
+            target: Vec3::new(target_x, target_y, target_z),
+            ..Camera::default()
+        };
+    }
+
+    /// Get the current holographic configuration preset name.
+    ///
+    /// Returns "portrait", "4k", or "none" if holographic mode is disabled.
+    #[wasm_bindgen(js_name = getHolographicPreset)]
+    #[must_use]
+    pub fn get_holographic_preset(&self) -> String {
+        match &self.holographic_config {
+            Some(config) => {
+                // Identify preset by num_views and view dimensions
+                if config.num_views == 45 && config.view_width == 420 {
+                    "portrait".to_string()
+                } else if config.num_views == 45 && config.view_width == 819 {
+                    "4k".to_string()
+                } else {
+                    "custom".to_string()
+                }
+            }
+            None => "none".to_string(),
+        }
+    }
+
+    /// Get information about a specific quilt view.
+    ///
+    /// Returns a JS object with view offset, dimensions, and camera position,
+    /// or null if the view index is out of range or holographic mode is disabled.
+    #[wasm_bindgen(js_name = getQuiltViewInfo)]
+    #[must_use]
+    pub fn get_quilt_view_info(&self, view_index: u32) -> JsValue {
+        let Some(config) = &self.holographic_config else {
+            return JsValue::NULL;
+        };
+
+        if view_index >= config.num_views {
+            return JsValue::NULL;
+        }
+
+        let (x_offset, y_offset) = config.view_offset(view_index);
+        let (col, row) = config.view_to_grid(view_index);
+
+        let obj = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("index"),
+            &JsValue::from_f64(f64::from(view_index)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("xOffset"),
+            &JsValue::from_f64(f64::from(x_offset)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("yOffset"),
+            &JsValue::from_f64(f64::from(y_offset)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("width"),
+            &JsValue::from_f64(f64::from(config.view_width)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("height"),
+            &JsValue::from_f64(f64::from(config.view_height)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("column"),
+            &JsValue::from_f64(f64::from(col)),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("row"),
+            &JsValue::from_f64(f64::from(row)),
+        );
+
+        obj.into()
+    }
+
+    /// Get statistics from the holographic renderer.
+    ///
+    /// Returns a JS object with: framesRendered, avgRenderTimeMs, peakRenderTimeMs, totalViewsRendered
+    /// Returns null if holographic mode is not enabled.
+    #[wasm_bindgen(js_name = getHolographicStats)]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Stats counters unlikely to exceed 2^52
+    pub fn get_holographic_stats(&self) -> JsValue {
+        let Some(renderer) = &self.holographic_renderer else {
+            return JsValue::NULL;
+        };
+
+        let stats = renderer.stats();
+        let obj = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("framesRendered"),
+            &JsValue::from_f64(stats.frames_rendered as f64),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("avgRenderTimeMs"),
+            &JsValue::from_f64(stats.avg_render_time_ms),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("peakRenderTimeMs"),
+            &JsValue::from_f64(stats.peak_render_time_ms),
+        );
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("totalViewsRendered"),
+            &JsValue::from_f64(stats.total_views_rendered as f64),
+        );
+
+        obj.into()
+    }
+
+    /// Reset holographic rendering statistics.
+    #[wasm_bindgen(js_name = resetHolographicStats)]
+    pub fn reset_holographic_stats(&mut self) {
+        if let Some(renderer) = &mut self.holographic_renderer {
+            renderer.reset_stats();
+        }
     }
 }
 

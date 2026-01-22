@@ -11,9 +11,13 @@
 //! 3. The result is a QuiltRenderTarget with all views rendered
 //! ```
 
+#[cfg(feature = "gpu")]
 use crate::backend::wgpu::{Viewport, WgpuBackend};
+#[cfg(feature = "gpu")]
 use crate::error::RenderResult;
-use crate::quilt::{Quilt, QuiltRenderSettings, QuiltRenderTarget, QuiltView};
+#[cfg(feature = "gpu")]
+use crate::quilt::QuiltView;
+use crate::quilt::{Quilt, QuiltRenderSettings, QuiltRenderTarget};
 use crate::spatial::{Camera, HolographicConfig};
 use canvas_core::Scene;
 use serde::{Deserialize, Serialize};
@@ -197,6 +201,7 @@ impl HolographicRenderer {
     /// Returns a `RenderError` if:
     /// - The viewport is invalid (zero dimensions or out of bounds)
     /// - The frame rendering fails
+    #[cfg(feature = "gpu")]
     pub fn render_view(
         &self,
         backend: &mut WgpuBackend,
