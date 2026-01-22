@@ -5383,4 +5383,551 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.synced_count, 1);
     }
+
+    // ============================================================
+    // Additional SyncProcessor Tests - Comprehensive Coverage
+    // ============================================================
+
+    #[test]
+    fn test_process_batch_mixed_operations() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element1 = Element::new(ElementKind::Text {
+            content: "First".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let element2 = Element::new(ElementKind::Text {
+            content: "Second".to_string(),
+            font_size: 18.0,
+            color: "#ffffff".to_string(),
+        });
+        let element1_id = element1.id;
+        let element2_id = element2.id;
+
+        let operations = vec![
+            Operation::AddElement {
+                element: element1,
+                timestamp: 1000,
+            },
+            Operation::AddElement {
+                element: element2,
+                timestamp: 1001,
+            },
+            Operation::UpdateElement {
+                id: element1_id,
+                changes: serde_json::json!({"transform": {"x": 50.0}}),
+                timestamp: 1002,
+            },
+            Operation::RemoveElement {
+                id: element2_id,
+                timestamp: 1003,
+            },
+        ];
+
+        let result = processor.process_batch("default", operations);
+
+        assert!(result.success);
+        assert_eq!(result.synced_count, 4);
+        assert_eq!(result.failed_count, 0);
+
+        let scene = store.get("default").expect("scene should exist");
+        assert_eq!(scene.element_count(), 1);
+        let updated_element = scene
+            .get_element(element1_id)
+            .expect("element1 should exist");
+        assert!((updated_element.transform.x - 50.0).abs() < f32::EPSILON);
+        assert!(scene.get_element(element2_id).is_none());
+    }
+
+    #[test]
+    fn test_no_conflict_valid_operations_sequence() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let element_id = element.id;
+        let add_op = Operation::AddElement {
+            element,
+            timestamp: 1000,
+        };
+        let result = processor.process_batch("default", vec![add_op]);
+        assert!(result.success);
+        assert_eq!(result.conflict_count, 0);
+
+        let update_op = Operation::UpdateElement {
+            id: element_id,
+            changes: serde_json::json!({"transform": {"x": 100.0}}),
+            timestamp: 2000,
+        };
+        let result = processor.process_batch("default", vec![update_op]);
+        assert!(result.success);
+        assert_eq!(result.conflict_count, 0);
+
+        let remove_op = Operation::RemoveElement {
+            id: element_id,
+            timestamp: 3000,
+        };
+        let result = processor.process_batch("default", vec![remove_op]);
+        assert!(result.success);
+        assert_eq!(result.conflict_count, 0);
+    }
+
+    #[test]
+    fn test_resolve_conflict_last_write_wins_comprehensive() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // Test ElementAlreadyExists - should keep remote (the incoming add)
+        let conflict = Conflict::new(
+            Operation::AddElement {
+                element: Element::new(ElementKind::Text {
+                    content: "Test".to_string(),
+                    font_size: 16.0,
+                    color: "#000000".to_string(),
+                }),
+                timestamp: 1000,
+            },
+            ConflictReason::ElementAlreadyExists,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+
+        // Test StaleTimestamp - should keep local (newer wins)
+        let conflict = Conflict::new(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1000,
+            },
+            ConflictReason::StaleTimestamp {
+                local: 2000,
+                remote: 1000,
+            },
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+
+        // Test ElementNotFound - always keep local
+        let conflict = Conflict::new(
+            Operation::RemoveElement {
+                id: canvas_core::ElementId::new(),
+                timestamp: 1000,
+            },
+            ConflictReason::ElementNotFound,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_resolve_conflict_local_wins_comprehensive() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LocalWins);
+
+        // Test ElementAlreadyExists - should keep local
+        let conflict = Conflict::new(
+            Operation::AddElement {
+                element: Element::new(ElementKind::Text {
+                    content: "Test".to_string(),
+                    font_size: 16.0,
+                    color: "#000000".to_string(),
+                }),
+                timestamp: 1000,
+            },
+            ConflictReason::ElementAlreadyExists,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+
+        // Test StaleTimestamp - should keep local
+        let conflict = Conflict::new(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1000,
+            },
+            ConflictReason::StaleTimestamp {
+                local: 500,
+                remote: 1000,
+            },
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+
+        // Test ConcurrentModification - should keep local
+        let conflict = Conflict::new(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1000,
+            },
+            ConflictReason::ConcurrentModification,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_resolve_conflict_remote_wins_comprehensive() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::RemoteWins);
+
+        // Test ElementAlreadyExists - should keep remote
+        let conflict = Conflict::new(
+            Operation::AddElement {
+                element: Element::new(ElementKind::Text {
+                    content: "Test".to_string(),
+                    font_size: 16.0,
+                    color: "#000000".to_string(),
+                }),
+                timestamp: 1000,
+            },
+            ConflictReason::ElementAlreadyExists,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+
+        // Test StaleTimestamp - should keep remote (even though older)
+        let conflict = Conflict::new(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1000,
+            },
+            ConflictReason::StaleTimestamp {
+                local: 2000,
+                remote: 1000,
+            },
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+
+        // Test ConcurrentModification - should keep remote
+        let conflict = Conflict::new(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1000,
+            },
+            ConflictReason::ConcurrentModification,
+        );
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+    }
+
+    #[test]
+    fn test_retry_config_default_values_check() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.initial_delay_ms, 100);
+        assert_eq!(config.max_delay_ms, 5000);
+        assert!((config.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_retry_config_exponential_backoff_sequence() {
+        let config = RetryConfig::new(5, 100, 10000, 2.0);
+
+        assert_eq!(config.delay_for_attempt(0).as_millis(), 100);
+        assert_eq!(config.delay_for_attempt(1).as_millis(), 200);
+        assert_eq!(config.delay_for_attempt(2).as_millis(), 400);
+        assert_eq!(config.delay_for_attempt(3).as_millis(), 800);
+        assert_eq!(config.delay_for_attempt(4).as_millis(), 1600);
+    }
+
+    #[tokio::test]
+    async fn test_process_with_retry_success_on_first_attempt() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Success".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let operations = vec![Operation::AddElement {
+            element,
+            timestamp: 1000,
+        }];
+
+        let config = RetryConfig::new(3, 10, 100, 2.0);
+        let result = processor
+            .process_with_retry("test-session", operations, &config)
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.synced_count, 1);
+        assert_eq!(result.failed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_with_retry_exhausts_all_retries() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Exists".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let element_id = element.id;
+        let add_op = Operation::AddElement {
+            element: element.clone(),
+            timestamp: 1000,
+        };
+        let result = processor.process_batch("test-session", vec![add_op]);
+        assert!(result.success);
+
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LocalWins);
+        let operations = vec![Operation::AddElement {
+            element,
+            timestamp: 2000,
+        }];
+
+        let config = RetryConfig::new(2, 5, 20, 2.0);
+        let result = processor
+            .process_with_retry("test-session", operations, &config)
+            .await;
+
+        assert!(!result.success);
+        assert_eq!(result.synced_count, 0);
+
+        let scene = store.get("test-session").expect("scene should exist");
+        assert!(scene.get_element(element_id).is_some());
+    }
+
+    #[test]
+    fn test_conflict_element_not_found_marked_retryable() {
+        // When an element is not found, the conflict is detected and resolved
+        // with KeepLocal. The failure is marked as RETRYABLE because the state
+        // may change (another client might add the element).
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let fake_id = canvas_core::ElementId::new();
+        let operations = vec![Operation::UpdateElement {
+            id: fake_id,
+            changes: serde_json::json!({"transform": {"x": 100.0}}),
+            timestamp: 1000,
+        }];
+
+        let result = processor.process_batch("default", operations);
+
+        assert!(!result.success);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(result.failed_operations.len(), 1);
+
+        // ElementNotFound through conflict path is retryable (state may change)
+        assert!(
+            result.failed_operations[0].retryable,
+            "ElementNotFound conflict should be retryable (state may change)"
+        );
+    }
+
+    #[test]
+    fn test_sync_processor_result_retryable_and_permanent_counts() {
+        let mut result = SyncProcessorResult::new();
+
+        result.record_failure(FailedOperation::retryable(
+            Operation::AddElement {
+                element: Element::new(ElementKind::Text {
+                    content: "T".to_string(),
+                    font_size: 16.0,
+                    color: "#000".to_string(),
+                }),
+                timestamp: 1000,
+            },
+            "transient error".to_string(),
+        ));
+        result.record_failure(FailedOperation::permanent(
+            Operation::RemoveElement {
+                id: canvas_core::ElementId::new(),
+                timestamp: 1001,
+            },
+            "permanent error".to_string(),
+        ));
+        result.record_failure(FailedOperation::retryable(
+            Operation::UpdateElement {
+                id: canvas_core::ElementId::new(),
+                changes: serde_json::json!({}),
+                timestamp: 1002,
+            },
+            "another transient".to_string(),
+        ));
+
+        assert_eq!(result.retryable_count(), 2);
+        assert_eq!(result.permanent_count(), 1);
+        assert_eq!(result.failed_count, 3);
+    }
+
+    #[test]
+    fn test_sync_processor_result_finalize_success_flag() {
+        use std::time::Instant;
+
+        let mut result = SyncProcessorResult::new();
+        result.record_success();
+        result.record_success();
+        result.finalize(Instant::now());
+
+        assert!(result.success);
+        assert_eq!(result.synced_count, 2);
+
+        let mut result = SyncProcessorResult::new();
+        result.record_success();
+        result.record_failure(FailedOperation::permanent(
+            Operation::RemoveElement {
+                id: canvas_core::ElementId::new(),
+                timestamp: 1000,
+            },
+            "error".to_string(),
+        ));
+        result.finalize(Instant::now());
+
+        assert!(!result.success);
+        assert_eq!(result.synced_count, 1);
+        assert_eq!(result.failed_count, 1);
+    }
+
+    #[test]
+    fn test_conflict_mark_resolved_state() {
+        let mut conflict = Conflict::new(
+            Operation::AddElement {
+                element: Element::new(ElementKind::Text {
+                    content: "T".to_string(),
+                    font_size: 16.0,
+                    color: "#000".to_string(),
+                }),
+                timestamp: 1000,
+            },
+            ConflictReason::ElementAlreadyExists,
+        );
+
+        assert!(!conflict.resolved);
+        conflict.mark_resolved();
+        assert!(conflict.resolved);
+    }
+
+    #[test]
+    fn test_failed_operation_constructors_retryable_vs_permanent() {
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 1000,
+        };
+
+        let retryable = FailedOperation::retryable(op.clone(), "temp error".to_string());
+        assert!(retryable.retryable);
+        assert_eq!(retryable.error, "temp error");
+
+        let permanent = FailedOperation::permanent(op, "permanent error".to_string());
+        assert!(!permanent.retryable);
+        assert_eq!(permanent.error, "permanent error");
+    }
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_element_kind() -> impl Strategy<Value = ElementKind> {
+            (any::<String>(), 1.0f32..100.0f32, any::<String>()).prop_map(
+                |(content, font_size, color)| ElementKind::Text {
+                    content: content.chars().take(100).collect(),
+                    font_size,
+                    color: format!("#{:06x}", color.len() % 0xFFFFFF),
+                },
+            )
+        }
+
+        fn arb_operation() -> impl Strategy<Value = Operation> {
+            prop_oneof![
+                (arb_element_kind(), 0u64..u64::MAX).prop_map(|(kind, timestamp)| {
+                    Operation::AddElement {
+                        element: Element::new(kind),
+                        timestamp,
+                    }
+                }),
+                (any::<u64>(), 0u64..u64::MAX).prop_map(|(_, timestamp)| {
+                    Operation::RemoveElement {
+                        id: canvas_core::ElementId::new(),
+                        timestamp,
+                    }
+                }),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn prop_batch_processing_maintains_invariants(
+                ops in prop::collection::vec(arb_operation(), 0..10)
+            ) {
+                let store = Arc::new(SceneStore::new());
+                let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+                let result = processor.process_batch("prop-test", ops.clone());
+
+                let total = ops.len();
+                prop_assert!(
+                    result.synced_count + result.failed_count <= total,
+                    "synced_count ({}) + failed_count ({}) should not exceed total ({})",
+                    result.synced_count, result.failed_count, total
+                );
+
+                prop_assert_eq!(
+                    result.success,
+                    result.failed_count == 0,
+                    "success flag should match failed_count == 0"
+                );
+
+                prop_assert_eq!(
+                    result.failed_operations.len(),
+                    result.failed_count,
+                    "failed_operations length should match failed_count"
+                );
+
+                prop_assert_eq!(
+                    result.conflicts.len(),
+                    result.conflict_count,
+                    "conflicts length should match conflict_count"
+                );
+            }
+
+            #[test]
+            fn prop_retry_delay_never_exceeds_max(
+                initial_ms in 1u64..1000u64,
+                max_ms in 100u64..10000u64,
+                multiplier in 1.0f64..5.0f64,
+                attempt in 0u32..20u32
+            ) {
+                let max_delay = initial_ms.max(max_ms);
+                let config = RetryConfig::new(10, initial_ms, max_delay, multiplier);
+
+                let delay = config.delay_for_attempt(attempt);
+
+                prop_assert!(
+                    delay.as_millis() <= max_delay as u128,
+                    "delay {} should not exceed max_delay {}",
+                    delay.as_millis(),
+                    max_delay
+                );
+            }
+
+            #[test]
+            fn prop_empty_batch_always_succeeds(_seed in any::<u64>()) {
+                let store = Arc::new(SceneStore::new());
+                let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
+
+                let result = processor.process_batch("empty-test", vec![]);
+
+                prop_assert!(result.success);
+                prop_assert_eq!(result.synced_count, 0);
+                prop_assert_eq!(result.failed_count, 0);
+                prop_assert_eq!(result.conflict_count, 0);
+            }
+        }
+    }
 }
