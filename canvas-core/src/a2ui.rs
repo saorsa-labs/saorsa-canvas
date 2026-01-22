@@ -399,12 +399,7 @@ impl A2UIConverter {
     }
 
     /// Layout children stacked on top of each other (same position, different z-index).
-    fn layout_stack(
-        &mut self,
-        children: &[A2UINode],
-        start_x: f32,
-        start_y: f32,
-    ) -> Vec<Element> {
+    fn layout_stack(&mut self, children: &[A2UINode], start_x: f32, start_y: f32) -> Vec<Element> {
         let mut elements = Vec::new();
 
         for child in children {
@@ -1114,13 +1109,19 @@ mod tests {
         let d = &result.elements[3].transform;
 
         // A and B same row (same y)
-        assert!((a.y - b.y).abs() < f32::EPSILON, "A and B should be on same row");
+        assert!(
+            (a.y - b.y).abs() < f32::EPSILON,
+            "A and B should be on same row"
+        );
         // B is to the right of A
         assert!(b.x > a.x, "B should be right of A");
         // C is below A (new row)
         assert!(c.y > a.y, "C should be below A (new row)");
         // C and D same row
-        assert!((c.y - d.y).abs() < f32::EPSILON, "C and D should be on same row");
+        assert!(
+            (c.y - d.y).abs() < f32::EPSILON,
+            "C and D should be on same row"
+        );
     }
 
     #[test]
@@ -1147,7 +1148,10 @@ mod tests {
         // Stack layout: same position, different z-index
         assert!((bg.x - fg.x).abs() < f32::EPSILON, "X should be same");
         assert!((bg.y - fg.y).abs() < f32::EPSILON, "Y should be same");
-        assert!(fg.z_index > bg.z_index, "Foreground should have higher z-index");
+        assert!(
+            fg.z_index > bg.z_index,
+            "Foreground should have higher z-index"
+        );
     }
 
     #[test]

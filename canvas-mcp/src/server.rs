@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use canvas_core::{
-    Element, ElementId, ElementKind, ImageFormat, SceneDocument, SceneStore, Transform,
+    A2UITree, Element, ElementId, ElementKind, ImageFormat, SceneDocument, SceneStore, Transform,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -392,6 +392,7 @@ impl CanvasMcpServer {
 
         let result = match name {
             "canvas_render" => self.call_canvas_render(arguments).await,
+            "canvas_render_a2ui" => self.call_canvas_render_a2ui(arguments).await,
             "canvas_interact" => self.call_canvas_interact(arguments),
             "canvas_export" => self.call_canvas_export(arguments),
             "canvas_clear" => self.call_canvas_clear(arguments).await,
@@ -471,6 +472,102 @@ impl CanvasMcpServer {
             "element_id": element_id.to_string(),
             "rendered": true,
             "element_count": final_count
+        }))
+    }
+
+    /// Call `canvas_render_a2ui` tool - render an A2UI component tree.
+    ///
+    /// Accepts an A2UI JSON tree, converts it to canvas elements,
+    /// and either replaces or merges with the existing scene.
+    async fn call_canvas_render_a2ui(&self, arguments: serde_json::Value) -> ToolResponse {
+        let session_id = extract_session_id(&arguments);
+
+        // Extract the A2UI tree
+        let Some(tree_json) = arguments.get("tree") else {
+            return ToolResponse::error("Missing required field: tree");
+        };
+
+        // Parse the A2UI tree
+        let tree: A2UITree = match serde_json::from_value(tree_json.clone()) {
+            Ok(t) => t,
+            Err(e) => return ToolResponse::error(format!("Invalid A2UI tree: {e}")),
+        };
+
+        // Check merge mode (default: replace)
+        let merge = arguments
+            .get("merge")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        // Extract optional position offset
+        #[allow(clippy::cast_possible_truncation)]
+        let offset_x = arguments
+            .get("offset_x")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let offset_y = arguments
+            .get("offset_y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+
+        // Convert A2UI tree to elements
+        let conversion_result = tree.to_elements();
+        let mut elements = conversion_result.elements;
+
+        // Apply offset to all element positions
+        for element in &mut elements {
+            element.transform.x += offset_x;
+            element.transform.y += offset_y;
+        }
+
+        // Collect element IDs before moving
+        let element_ids: Vec<String> = elements.iter().map(|e| e.id.to_string()).collect();
+
+        // Clear existing scene if not merging
+        if !merge {
+            if let Err(e) = self.store.clear(&session_id) {
+                // If session doesn't exist, that's fine - we'll create it
+                if self.store.get(&session_id).is_some() {
+                    return ToolResponse::error(format!("Failed to clear session: {e}"));
+                }
+            }
+        }
+
+        // Add all converted elements to the scene
+        for element in elements {
+            if let Err(e) = self.store.add_element(&session_id, element) {
+                return ToolResponse::error(format!("Failed to add element: {e}"));
+            }
+        }
+
+        // Update metadata
+        let element_count = self.store.get(&session_id).map_or(0, |s| s.element_count());
+
+        let mut metadata = self.session_metadata.write().await;
+        let session = metadata
+            .entry(session_id.clone())
+            .or_insert_with(|| create_session_metadata(&session_id, 800.0, 600.0));
+        update_session_metadata(session, element_count);
+        let final_count = session.element_count;
+        drop(metadata);
+
+        // Notify change callback
+        if let Some(ref callback) = self.on_change {
+            if let Some(scene) = self.store.get(&session_id) {
+                callback(&session_id, &scene);
+            }
+        }
+
+        // Include any conversion warnings
+        let warnings: Vec<String> = conversion_result.warnings;
+
+        ToolResponse::success(serde_json::json!({
+            "session_id": session_id,
+            "element_ids": element_ids,
+            "element_count": final_count,
+            "rendered": true,
+            "warnings": warnings
         }))
     }
 
@@ -819,6 +916,11 @@ fn get_available_tools() -> Vec<Tool> {
             input_schema: render_tool_schema(),
         },
         Tool {
+            name: "canvas_render_a2ui".to_string(),
+            description: "Render an A2UI component tree to the canvas. Supports Container, Text, Image, Button, Chart, and VideoFeed components with automatic layout.".to_string(),
+            input_schema: render_a2ui_tool_schema(),
+        },
+        Tool {
             name: "canvas_interact".to_string(),
             description: "Report user interaction (touch, voice, selection) on the canvas"
                 .to_string(),
@@ -958,6 +1060,47 @@ fn render_tool_schema() -> serde_json::Value {
             }
         },
         "required": ["content"]
+    })
+}
+
+/// Schema for `canvas_render_a2ui` tool.
+fn render_a2ui_tool_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "session_id": session_id_property(),
+            "tree": {
+                "type": "object",
+                "description": "A2UI component tree to render",
+                "properties": {
+                    "root": {
+                        "type": "object",
+                        "description": "Root A2UI node (Container, Text, Image, Button, Chart, or VideoFeed)"
+                    },
+                    "data_model": {
+                        "type": "object",
+                        "description": "Optional data bindings for dynamic content"
+                    }
+                },
+                "required": ["root"]
+            },
+            "merge": {
+                "type": "boolean",
+                "description": "If true, merge with existing scene. If false (default), replace scene.",
+                "default": false
+            },
+            "offset_x": {
+                "type": "number",
+                "description": "X offset to apply to all elements (default: 0)",
+                "default": 0
+            },
+            "offset_y": {
+                "type": "number",
+                "description": "Y offset to apply to all elements (default: 0)",
+                "default": 0
+            }
+        },
+        "required": ["tree"]
     })
 }
 
@@ -1476,12 +1619,13 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // Should have 8 tools total
-        assert_eq!(tools.len(), 8);
+        // Should have 9 tools total
+        assert_eq!(tools.len(), 9);
 
         // Verify all tool names are present
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(tool_names.contains(&"canvas_render"));
+        assert!(tool_names.contains(&"canvas_render_a2ui"));
         assert!(tool_names.contains(&"canvas_interact"));
         assert!(tool_names.contains(&"canvas_export"));
         assert!(tool_names.contains(&"canvas_clear"));
@@ -1489,5 +1633,148 @@ mod tests {
         assert!(tool_names.contains(&"canvas_remove_element"));
         assert!(tool_names.contains(&"canvas_update_element"));
         assert!(tool_names.contains(&"canvas_get_scene"));
+    }
+
+    #[tokio::test]
+    async fn test_canvas_render_a2ui() {
+        let server = CanvasMcpServer::new(SceneStore::new());
+
+        // Initialize first
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(0),
+                method: "initialize".to_string(),
+                params: serde_json::json!({}),
+            })
+            .await;
+
+        // Render an A2UI tree with a container and text
+        // Note: A2UI uses "component" tag with snake_case values
+        let response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(1),
+                method: "tools/call".to_string(),
+                params: serde_json::json!({
+                    "name": "canvas_render_a2ui",
+                    "arguments": {
+                        "session_id": "default",
+                        "tree": {
+                            "root": {
+                                "component": "container",
+                                "children": [
+                                    {
+                                        "component": "text",
+                                        "content": "Hello A2UI"
+                                    },
+                                    {
+                                        "component": "button",
+                                        "label": "Click Me",
+                                        "action": "submit"
+                                    }
+                                ],
+                                "layout": "column"
+                            }
+                        }
+                    }
+                }),
+            })
+            .await;
+
+        assert!(response.result.is_some());
+        assert!(response.error.is_none());
+
+        // Verify the response contains element_ids
+        let result = response.result.unwrap();
+        let content = result["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("element_ids"));
+        assert!(text.contains("rendered"));
+    }
+
+    #[tokio::test]
+    async fn test_canvas_render_a2ui_with_merge() {
+        let server = CanvasMcpServer::new(SceneStore::new());
+
+        // Initialize first
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(0),
+                method: "initialize".to_string(),
+                params: serde_json::json!({}),
+            })
+            .await;
+
+        // First render (A2UI uses "component" tag with snake_case)
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(1),
+                method: "tools/call".to_string(),
+                params: serde_json::json!({
+                    "name": "canvas_render_a2ui",
+                    "arguments": {
+                        "session_id": "default",
+                        "tree": {
+                            "root": {
+                                "component": "text",
+                                "content": "First"
+                            }
+                        }
+                    }
+                }),
+            })
+            .await;
+
+        // Second render with merge=true
+        let response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(2),
+                method: "tools/call".to_string(),
+                params: serde_json::json!({
+                    "name": "canvas_render_a2ui",
+                    "arguments": {
+                        "session_id": "default",
+                        "tree": {
+                            "root": {
+                                "component": "text",
+                                "content": "Second"
+                            }
+                        },
+                        "merge": true,
+                        "offset_x": 100.0,
+                        "offset_y": 50.0
+                    }
+                }),
+            })
+            .await;
+
+        assert!(response.result.is_some());
+
+        // Get scene and verify both elements exist
+        let get_response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: serde_json::json!(3),
+                method: "tools/call".to_string(),
+                params: serde_json::json!({
+                    "name": "canvas_get_scene",
+                    "arguments": {
+                        "session_id": "default"
+                    }
+                }),
+            })
+            .await;
+
+        let get_result = get_response.result.unwrap();
+        let content = get_result["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+
+        // Both "First" and "Second" should be in the scene
+        assert!(text.contains("First"));
+        assert!(text.contains("Second"));
     }
 }
