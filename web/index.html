@@ -251,6 +251,152 @@
             opacity: 1;
             transform: translateX(-50%) translateY(0);
         }
+
+        /* Holographic Preview Overlay */
+        #holographic-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            z-index: 150;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+
+        #holographic-overlay.visible {
+            display: flex;
+        }
+
+        #holographic-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 1200px;
+            padding: 0 16px;
+            margin-bottom: 16px;
+        }
+
+        #holographic-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        #holographic-mode-indicator {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            background: #FF9800;
+            color: #000;
+            font-weight: 600;
+        }
+
+        #holographic-mode-indicator.hardware {
+            background: #4CAF50;
+        }
+
+        #holographic-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .holo-btn {
+            padding: 8px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .holo-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .holo-btn.active {
+            background: #6366f1;
+            border-color: #6366f1;
+        }
+
+        #holographic-preview-container {
+            position: relative;
+            max-width: 100%;
+            max-height: calc(100vh - 200px);
+            overflow: hidden;
+            border-radius: 8px;
+            background: #000;
+        }
+
+        #quilt-preview-canvas {
+            max-width: 100%;
+            max-height: calc(100vh - 200px);
+            object-fit: contain;
+        }
+
+        #single-view-canvas {
+            max-width: 100%;
+            max-height: calc(100vh - 200px);
+            object-fit: contain;
+            display: none;
+        }
+
+        #view-indicator {
+            position: absolute;
+            bottom: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 6px 12px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 4px;
+            font-size: 12px;
+            color: #fff;
+            pointer-events: none;
+        }
+
+        #holographic-stats {
+            display: flex;
+            gap: 16px;
+            margin-top: 12px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        #holographic-stats span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        #close-holographic {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        #close-holographic:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -288,6 +434,37 @@
     <div id="element-info"></div>
 
     <div id="error-toast"></div>
+
+    <!-- Holographic Preview Overlay -->
+    <div id="holographic-overlay">
+        <button id="close-holographic" title="Close">&times;</button>
+        <div id="holographic-header">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span id="holographic-title">Holographic Preview</span>
+                <span id="holographic-mode-indicator">SIMULATION</span>
+            </div>
+            <div id="holographic-controls">
+                <button class="holo-btn active" data-view-mode="quilt">Quilt View</button>
+                <button class="holo-btn" data-view-mode="single">Single View</button>
+                <select id="holographic-preset" class="holo-btn">
+                    <option value="portrait">Portrait (45 views)</option>
+                    <option value="4k">4K (45 views)</option>
+                </select>
+                <button class="holo-btn" id="render-quilt-btn">Render</button>
+            </div>
+        </div>
+        <div id="holographic-preview-container">
+            <canvas id="quilt-preview-canvas"></canvas>
+            <canvas id="single-view-canvas"></canvas>
+            <div id="view-indicator">View 22 of 45</div>
+        </div>
+        <div id="holographic-stats">
+            <span id="quilt-dimensions">Quilt: 2100 × 5040</span>
+            <span id="view-dimensions">View: 420 × 560</span>
+            <span id="render-time">Render: -- ms</span>
+            <span id="frames-rendered">Frames: 0</span>
+        </div>
+    </div>
 
     <div id="toolbar">
         <button class="tool-btn active" data-tool="select" title="Select">
@@ -1038,6 +1215,12 @@
                 }
             }
 
+            // Status helper for UI updates
+            function updateStatus(message) {
+                console.log('[Status]', message);
+                // Could update a status element if desired
+            }
+
             // Error toast for user feedback
             let errorToastTimeout = null;
             const errorToast = document.getElementById('error-toast');
@@ -1376,64 +1559,306 @@
                 });
             });
 
+            // Holographic simulation state
+            let currentViewMode = 'quilt';
+            let currentViewIndex = 22; // Center view
+            let quiltImageData = null;
+            let holoHardwareConnected = false;
+
             // Toggle holographic mode for Looking Glass displays
             async function toggleHolographicMode() {
                 const btn = document.getElementById('holographic-btn');
+                const overlay = document.getElementById('holographic-overlay');
+                const modeIndicator = document.getElementById('holographic-mode-indicator');
 
                 if (!holographicMode) {
+                    // Enable holographic mode in WASM
+                    if (canvasApp) {
+                        try {
+                            const preset = document.getElementById('holographic-preset')?.value || 'portrait';
+                            canvasApp.setHolographicConfig(preset);
+                            console.log(`[Holographic] WASM holographic mode enabled: ${preset}`);
+                        } catch (e) {
+                            console.error('[Holographic] Failed to enable WASM holographic mode:', e);
+                            showErrorToast('Failed to enable holographic mode');
+                            return;
+                        }
+                    }
+
                     // Initialize Looking Glass Manager if needed
                     if (!lookingGlassManager && window.LookingGlass) {
-                        lookingGlassManager = new window.LookingGlass.Manager({
-                            preset: 'portrait',
-                            autoConnect: true,
-                            debug: true
-                        });
-
-                        lookingGlassManager.on('connected', (info) => {
-                            console.log('Looking Glass connected:', info);
-                            updateStatus(`Looking Glass: ${info.displayName || 'Connected'}`);
-                        });
-
-                        lookingGlassManager.on('disconnected', () => {
-                            console.log('Looking Glass disconnected');
-                            updateStatus('Looking Glass: Disconnected');
-                        });
-
-                        lookingGlassManager.on('error', (error) => {
-                            console.error('Looking Glass error:', error);
-                            updateStatus('Looking Glass: Error');
-                        });
+                        lookingGlassManager = new window.LookingGlass.Manager();
                     }
 
-                    // Start holographic rendering
+                    // Try to connect to HoloPlay Service
                     if (lookingGlassManager) {
-                        const connected = await lookingGlassManager.connect();
+                        const connected = await lookingGlassManager.holoPlayService?.connect();
+                        holoHardwareConnected = connected;
                         if (connected) {
-                            holographicMode = true;
-                            btn.classList.add('active');
-                            btn.style.backgroundColor = '#4CAF50';
-                            console.log('Holographic mode enabled');
+                            console.log('[Holographic] HoloPlay Service connected');
+                            modeIndicator.textContent = 'HARDWARE';
+                            modeIndicator.classList.add('hardware');
                         } else {
-                            console.log('Looking Glass not available - using simulation mode');
-                            holographicMode = true;
-                            btn.classList.add('active');
-                            btn.style.backgroundColor = '#FF9800';
+                            console.log('[Holographic] HoloPlay Service not available - simulation mode');
+                            modeIndicator.textContent = 'SIMULATION';
+                            modeIndicator.classList.remove('hardware');
                         }
                     } else {
-                        console.warn('Looking Glass library not loaded');
-                        updateStatus('Looking Glass: Not available');
+                        modeIndicator.textContent = 'SIMULATION';
+                        modeIndicator.classList.remove('hardware');
                     }
+
+                    holographicMode = true;
+                    btn.classList.add('active');
+                    btn.style.backgroundColor = holoHardwareConnected ? '#4CAF50' : '#FF9800';
+
+                    // Show the overlay and render initial quilt
+                    overlay.classList.add('visible');
+                    updateHolographicStats();
+                    renderHolographicQuilt();
+
+                    console.log('[Holographic] Mode enabled');
                 } else {
                     // Disable holographic mode
                     holographicMode = false;
                     btn.classList.remove('active');
                     btn.style.backgroundColor = '';
+                    overlay.classList.remove('visible');
+
+                    if (canvasApp) {
+                        canvasApp.setHolographicConfig('off');
+                    }
 
                     if (lookingGlassManager) {
-                        lookingGlassManager.disconnect();
+                        lookingGlassManager.holoPlayService?.disconnect();
                     }
-                    console.log('Holographic mode disabled');
+                    holoHardwareConnected = false;
+                    console.log('[Holographic] Mode disabled');
                 }
+            }
+
+            // Render the quilt using WASM
+            function renderHolographicQuilt() {
+                if (!canvasApp || !holographicMode) return;
+
+                const startTime = performance.now();
+
+                try {
+                    // Get quilt dimensions from WASM
+                    const dims = canvasApp.getQuiltDimensions();
+                    if (!dims) {
+                        console.error('[Holographic] Failed to get quilt dimensions');
+                        return;
+                    }
+
+                    // Render quilt
+                    const pixelData = canvasApp.renderQuilt();
+                    if (!pixelData || pixelData.length === 0) {
+                        console.error('[Holographic] Failed to render quilt');
+                        return;
+                    }
+
+                    const renderTime = performance.now() - startTime;
+                    console.log(`[Holographic] Quilt rendered in ${renderTime.toFixed(2)}ms`);
+
+                    // Create ImageData from pixel data
+                    quiltImageData = new ImageData(
+                        new Uint8ClampedArray(pixelData),
+                        dims.width,
+                        dims.height
+                    );
+
+                    // Display based on current view mode
+                    if (currentViewMode === 'quilt') {
+                        displayQuiltView(quiltImageData, dims);
+                    } else {
+                        displaySingleView(quiltImageData, dims, currentViewIndex);
+                    }
+
+                    // Update stats
+                    const stats = canvasApp.getHolographicStats();
+                    if (stats) {
+                        document.getElementById('render-time').textContent =
+                            `Render: ${stats.avgRenderTimeMs.toFixed(2)} ms`;
+                        document.getElementById('frames-rendered').textContent =
+                            `Frames: ${stats.framesRendered}`;
+                    }
+
+                    // Send to HoloPlay Service if connected
+                    if (holoHardwareConnected && lookingGlassManager?.holoPlayService) {
+                        const quiltCanvas = document.getElementById('quilt-preview-canvas');
+                        lookingGlassManager.holoPlayService.sendQuilt(quiltCanvas);
+                    }
+                } catch (e) {
+                    console.error('[Holographic] Render error:', e);
+                    showErrorToast('Failed to render quilt: ' + e.message);
+                }
+            }
+
+            // Display full quilt view
+            function displayQuiltView(imageData, dims) {
+                const quiltCanvas = document.getElementById('quilt-preview-canvas');
+                const singleCanvas = document.getElementById('single-view-canvas');
+
+                quiltCanvas.width = dims.width;
+                quiltCanvas.height = dims.height;
+                quiltCanvas.style.display = 'block';
+                singleCanvas.style.display = 'none';
+
+                const ctx = quiltCanvas.getContext('2d');
+                ctx.putImageData(imageData, 0, 0);
+
+                // Draw view number labels
+                ctx.font = '16px sans-serif';
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+
+                for (let i = 0; i < dims.views; i++) {
+                    const viewInfo = canvasApp.getQuiltViewInfo(i);
+                    if (viewInfo) {
+                        const labelX = viewInfo.xOffset + viewInfo.width / 2;
+                        const labelY = viewInfo.yOffset + viewInfo.height / 2;
+                        ctx.fillText(String(i), labelX, labelY);
+                    }
+                }
+
+                document.getElementById('view-indicator').textContent =
+                    `Quilt: ${dims.columns}×${dims.rows} (${dims.views} views)`;
+            }
+
+            // Display single view with mouse tracking
+            function displaySingleView(imageData, dims, viewIndex) {
+                const quiltCanvas = document.getElementById('quilt-preview-canvas');
+                const singleCanvas = document.getElementById('single-view-canvas');
+
+                const viewInfo = canvasApp.getQuiltViewInfo(viewIndex);
+                if (!viewInfo) return;
+
+                singleCanvas.width = viewInfo.width;
+                singleCanvas.height = viewInfo.height;
+                singleCanvas.style.display = 'block';
+                quiltCanvas.style.display = 'none';
+
+                const ctx = singleCanvas.getContext('2d');
+
+                // Extract view from quilt
+                const viewImageData = ctx.createImageData(viewInfo.width, viewInfo.height);
+                const srcData = imageData.data;
+                const dstData = viewImageData.data;
+
+                for (let y = 0; y < viewInfo.height; y++) {
+                    for (let x = 0; x < viewInfo.width; x++) {
+                        const srcX = viewInfo.xOffset + x;
+                        const srcY = viewInfo.yOffset + y;
+                        const srcIdx = (srcY * dims.width + srcX) * 4;
+                        const dstIdx = (y * viewInfo.width + x) * 4;
+
+                        dstData[dstIdx] = srcData[srcIdx];
+                        dstData[dstIdx + 1] = srcData[srcIdx + 1];
+                        dstData[dstIdx + 2] = srcData[srcIdx + 2];
+                        dstData[dstIdx + 3] = srcData[srcIdx + 3];
+                    }
+                }
+
+                ctx.putImageData(viewImageData, 0, 0);
+
+                document.getElementById('view-indicator').textContent =
+                    `View ${viewIndex + 1} of ${dims.views}`;
+            }
+
+            // Update holographic stats display
+            function updateHolographicStats() {
+                if (!canvasApp) return;
+
+                const dims = canvasApp.getQuiltDimensions();
+                if (dims) {
+                    document.getElementById('quilt-dimensions').textContent =
+                        `Quilt: ${dims.width} × ${dims.height}`;
+                    document.getElementById('view-dimensions').textContent =
+                        `View: ${dims.viewWidth} × ${dims.viewHeight}`;
+                }
+            }
+
+            // Set up holographic overlay event handlers
+            function setupHolographicControls() {
+                // Close button
+                document.getElementById('close-holographic')?.addEventListener('click', () => {
+                    if (holographicMode) {
+                        toggleHolographicMode();
+                    }
+                });
+
+                // View mode buttons (quilt/single)
+                document.querySelectorAll('[data-view-mode]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const mode = btn.dataset.viewMode;
+                        currentViewMode = mode;
+
+                        // Update button states
+                        document.querySelectorAll('[data-view-mode]').forEach(b => {
+                            b.classList.toggle('active', b.dataset.viewMode === mode);
+                        });
+
+                        // Re-render with new mode
+                        if (quiltImageData && canvasApp) {
+                            const dims = canvasApp.getQuiltDimensions();
+                            if (mode === 'quilt') {
+                                displayQuiltView(quiltImageData, dims);
+                            } else {
+                                displaySingleView(quiltImageData, dims, currentViewIndex);
+                            }
+                        }
+                    });
+                });
+
+                // Preset selector
+                document.getElementById('holographic-preset')?.addEventListener('change', (e) => {
+                    if (canvasApp && holographicMode) {
+                        canvasApp.setHolographicConfig(e.target.value);
+                        updateHolographicStats();
+                        renderHolographicQuilt();
+                    }
+                });
+
+                // Render button
+                document.getElementById('render-quilt-btn')?.addEventListener('click', () => {
+                    renderHolographicQuilt();
+                });
+
+                // Mouse tracking for single view mode (simulates Looking Glass parallax)
+                const container = document.getElementById('holographic-preview-container');
+                container?.addEventListener('mousemove', (e) => {
+                    if (currentViewMode !== 'single' || !canvasApp || !holographicMode) return;
+
+                    const rect = container.getBoundingClientRect();
+                    const xPercent = (e.clientX - rect.left) / rect.width;
+
+                    const dims = canvasApp.getQuiltDimensions();
+                    if (dims) {
+                        const newViewIndex = Math.floor(xPercent * dims.views);
+                        if (newViewIndex !== currentViewIndex && newViewIndex >= 0 && newViewIndex < dims.views) {
+                            currentViewIndex = newViewIndex;
+                            displaySingleView(quiltImageData, dims, currentViewIndex);
+                        }
+                    }
+                });
+
+                // Keyboard navigation for views
+                document.addEventListener('keydown', (e) => {
+                    if (!holographicMode || currentViewMode !== 'single') return;
+
+                    const dims = canvasApp?.getQuiltDimensions();
+                    if (!dims) return;
+
+                    if (e.key === 'ArrowLeft' && currentViewIndex > 0) {
+                        currentViewIndex--;
+                        displaySingleView(quiltImageData, dims, currentViewIndex);
+                    } else if (e.key === 'ArrowRight' && currentViewIndex < dims.views - 1) {
+                        currentViewIndex++;
+                        displaySingleView(quiltImageData, dims, currentViewIndex);
+                    }
+                });
             }
 
             // Toggle voice input mode
@@ -1565,6 +1990,9 @@
 
             // Initialize
             const wasmLoaded = await initWasm();
+
+            // Set up holographic controls
+            setupHolographicControls();
 
             const canvas = document.getElementById('main-canvas');
 
