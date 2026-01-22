@@ -1234,4 +1234,249 @@ mod tests {
 
         assert_eq!(original, parsed);
     }
+
+    // ===========================================
+    // Edge Case Tests
+    // ===========================================
+
+    #[test]
+    fn test_empty_container() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "vertical",
+                "children": []
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse empty container");
+
+        match &tree.root {
+            A2UINode::Container { children, .. } => {
+                assert!(children.is_empty());
+            }
+            _ => panic!("Expected Container node"),
+        }
+
+        // Should produce no elements when converted
+        let result = tree.to_elements();
+        assert!(result.elements.is_empty());
+    }
+
+    #[test]
+    fn test_deeply_nested_containers() {
+        // Create a 10-level deep nesting
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "vertical",
+                "children": [{
+                    "component": "container",
+                    "layout": "horizontal",
+                    "children": [{
+                        "component": "container",
+                        "layout": "vertical",
+                        "children": [{
+                            "component": "container",
+                            "layout": "horizontal",
+                            "children": [{
+                                "component": "container",
+                                "layout": "vertical",
+                                "children": [{
+                                    "component": "text",
+                                    "content": "Deep"
+                                }]
+                            }]
+                        }]
+                    }]
+                }]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse deep nesting");
+
+        // Verify we can traverse to the deepest text
+        fn count_depth(node: &A2UINode) -> usize {
+            match node {
+                A2UINode::Container { children, .. } => {
+                    1 + children.iter().map(count_depth).max().unwrap_or(0)
+                }
+                _ => 1,
+            }
+        }
+
+        assert_eq!(count_depth(&tree.root), 6); // 5 containers + 1 text
+
+        // Should convert successfully
+        let result = tree.to_elements();
+        assert_eq!(result.elements.len(), 1); // Just the text element
+    }
+
+    #[test]
+    fn test_container_with_mixed_children() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "vertical",
+                "children": [
+                    { "component": "text", "content": "Title" },
+                    { "component": "button", "label": "Action", "action": "click" },
+                    { "component": "container", "layout": "horizontal", "children": [
+                        { "component": "text", "content": "Nested" }
+                    ]},
+                    { "component": "image", "src": "test.png", "alt": "Test" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse mixed children");
+
+        match &tree.root {
+            A2UINode::Container { children, .. } => {
+                assert_eq!(children.len(), 4);
+            }
+            _ => panic!("Expected Container node"),
+        }
+
+        let result = tree.to_elements();
+        // Text, Button as Text, nested Text, Image = 4 elements
+        assert_eq!(result.elements.len(), 4);
+    }
+
+    #[test]
+    fn test_invalid_json_returns_error() {
+        let invalid_json = r#"{ not valid json }"#;
+        let result = A2UITree::from_json(invalid_json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_required_fields_returns_error() {
+        // Text without content
+        let json = r#"{
+            "root": {
+                "component": "text"
+            }
+        }"#;
+
+        let result = A2UITree::from_json(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unknown_component_type() {
+        // Unknown component type should fail parsing
+        let json = r#"{
+            "root": {
+                "component": "unknown_widget",
+                "value": "test"
+            }
+        }"#;
+
+        let result = A2UITree::from_json(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_text_with_empty_content() {
+        let json = r#"{
+            "root": {
+                "component": "text",
+                "content": ""
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse empty text");
+
+        match &tree.root {
+            A2UINode::Text { content, .. } => {
+                assert!(content.is_empty());
+            }
+            _ => panic!("Expected Text node"),
+        }
+    }
+
+    #[test]
+    fn test_container_single_child() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "vertical",
+                "children": [
+                    { "component": "text", "content": "Only child" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+
+        match &tree.root {
+            A2UINode::Container { children, .. } => {
+                assert_eq!(children.len(), 1);
+            }
+            _ => panic!("Expected Container node"),
+        }
+
+        let result = tree.to_elements();
+        assert_eq!(result.elements.len(), 1);
+    }
+
+    #[test]
+    fn test_data_model_preserved() {
+        let json = r#"{
+            "root": {
+                "component": "text",
+                "content": "Hello"
+            },
+            "data_model": {
+                "user": {
+                    "name": "Alice",
+                    "age": 30
+                },
+                "settings": ["a", "b", "c"]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+
+        // Verify data_model is preserved
+        assert_eq!(tree.data_model["user"]["name"], "Alice");
+        assert_eq!(tree.data_model["user"]["age"], 30);
+        assert_eq!(tree.data_model["settings"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_all_style_properties() {
+        let json = r##"{
+            "root": {
+                "component": "text",
+                "content": "Styled",
+                "style": {
+                    "font_size": 18.5,
+                    "color": "#123ABC",
+                    "background": "#FFFFFF",
+                    "padding": 10.0,
+                    "margin": 5.0,
+                    "width": 200.0,
+                    "height": 50.0
+                }
+            }
+        }"##;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+
+        match &tree.root {
+            A2UINode::Text { style, .. } => {
+                let s = style.as_ref().expect("should have style");
+                assert!((s.font_size.unwrap() - 18.5).abs() < 0.001);
+                assert_eq!(s.color.as_deref(), Some("#123ABC"));
+                assert_eq!(s.background.as_deref(), Some("#FFFFFF"));
+                assert!((s.padding.unwrap() - 10.0).abs() < 0.001);
+                assert!((s.margin.unwrap() - 5.0).abs() < 0.001);
+                assert!((s.width.unwrap() - 200.0).abs() < 0.001);
+                assert!((s.height.unwrap() - 50.0).abs() < 0.001);
+            }
+            _ => panic!("Expected Text node"),
+        }
+    }
 }
