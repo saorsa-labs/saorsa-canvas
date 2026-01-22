@@ -33,8 +33,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use canvas_core::{
-    CanvasState, Element, ElementId, ElementKind, InputEvent, Scene, SceneDocument, TouchEvent,
-    TouchPhase, TouchPoint, Transform,
+    CanvasState, Element, ElementId, ElementKind, FusionConfig, FusionResult, InputEvent,
+    InputFusion, Scene, SceneDocument, TouchEvent, TouchPhase, TouchPoint, Transform, VoiceEvent,
 };
 use canvas_renderer::{
     BackendType, Camera, HolographicConfig, HolographicRenderer, RenderBackend, RenderResult,
@@ -368,6 +368,8 @@ pub struct CanvasApp {
     holographic_renderer: Option<HolographicRenderer>,
     /// Camera for holographic rendering.
     holographic_camera: Camera,
+    /// Input fusion processor for touch+voice combination.
+    input_fusion: InputFusion,
 }
 
 #[wasm_bindgen]
@@ -428,6 +430,7 @@ impl CanvasApp {
             holographic_config: None,
             holographic_renderer: None,
             holographic_camera: Camera::default(),
+            input_fusion: InputFusion::new(),
         })
     }
 
@@ -462,11 +465,15 @@ impl CanvasApp {
             radius: None,
         };
 
-        // Create touch event
-        let touch_event = TouchEvent::new(touch_phase, vec![touch_point], 0);
-        let event = InputEvent::Touch(touch_event);
+        // Create touch event with target element for fusion
+        let mut touch_event = TouchEvent::new(touch_phase, vec![touch_point], 0);
+        touch_event.target_element = element_id;
+        let event = InputEvent::Touch(touch_event.clone());
 
-        // Process the event
+        // Process through fusion system (only Start events are stored for fusion)
+        let _ = self.input_fusion.process_touch(&touch_event);
+
+        // Process the event in state
         self.state.process_event(&event);
 
         // If an element was touched, select it
@@ -913,6 +920,131 @@ impl CanvasApp {
         if let Some(renderer) = &mut self.holographic_renderer {
             renderer.reset_stats();
         }
+    }
+
+    // =========================================================================
+    // Voice Input Methods
+    // =========================================================================
+
+    /// Process a voice recognition result.
+    ///
+    /// This method handles speech recognition results from the Web Speech API.
+    /// If a touch event is pending within the fusion window, it will create
+    /// a fused intent combining the voice command with the touch location.
+    ///
+    /// # Arguments
+    ///
+    /// * `transcript` - The recognized speech text
+    /// * `confidence` - Confidence score (0.0 to 1.0)
+    /// * `is_final` - Whether this is a final (committed) result
+    /// * `timestamp` - Timestamp when the speech was recognized (ms since epoch)
+    ///
+    /// # Returns
+    ///
+    /// JSON-encoded fusion result if fusion occurs, or null if no fusion.
+    #[wasm_bindgen(js_name = processVoice)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn process_voice(
+        &mut self,
+        transcript: String,
+        confidence: f32,
+        is_final: bool,
+        timestamp: f64,
+    ) -> JsValue {
+        let voice = VoiceEvent::new(transcript, confidence, is_final, timestamp as u64);
+        let result = self.input_fusion.process_voice(&voice);
+
+        // Also process the voice event through state
+        self.state.process_event(&InputEvent::Voice(voice));
+
+        match result {
+            FusionResult::Fused(intent) => serde_json::to_string(&intent)
+                .map(|s| JsValue::from_str(&s))
+                .unwrap_or(JsValue::NULL),
+            FusionResult::VoiceOnly(intent) => serde_json::to_string(&intent)
+                .map(|s| JsValue::from_str(&s))
+                .unwrap_or(JsValue::NULL),
+            FusionResult::Pending | FusionResult::None => JsValue::NULL,
+        }
+    }
+
+    /// Check if there's a pending touch waiting for voice fusion.
+    ///
+    /// Returns true if a touch event is stored and still within the fusion window.
+    #[wasm_bindgen(js_name = hasPendingTouch)]
+    #[must_use]
+    pub fn has_pending_touch(&self) -> bool {
+        self.input_fusion.is_touch_valid()
+    }
+
+    /// Get the remaining time in the fusion window for a pending touch.
+    ///
+    /// Returns the time in milliseconds, or 0 if no pending touch or expired.
+    #[wasm_bindgen(js_name = fusionTimeRemaining)]
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn fusion_time_remaining(&self) -> u32 {
+        self.input_fusion
+            .time_remaining()
+            .map_or(0, |d| d.as_millis().min(u128::from(u32::MAX)) as u32)
+    }
+
+    /// Configure the fusion time window.
+    ///
+    /// Sets how long a touch event waits for a voice command before expiring.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_ms` - Time window in milliseconds (default: 2000)
+    #[wasm_bindgen(js_name = setFusionWindow)]
+    pub fn set_fusion_window(&mut self, window_ms: u32) {
+        use std::time::Duration;
+        self.input_fusion.set_config(FusionConfig {
+            fusion_window: Duration::from_millis(u64::from(window_ms)),
+            ..self.input_fusion.config().clone()
+        });
+    }
+
+    /// Clear any pending touch event.
+    ///
+    /// Call this to cancel touch+voice fusion if the user cancels the operation.
+    #[wasm_bindgen(js_name = clearPendingTouch)]
+    pub fn clear_pending_touch(&mut self) {
+        self.input_fusion.clear_pending();
+    }
+
+    /// Get the current fusion window configuration in milliseconds.
+    #[wasm_bindgen(js_name = getFusionWindow)]
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn get_fusion_window(&self) -> u32 {
+        self.input_fusion
+            .config()
+            .fusion_window
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32
+    }
+
+    /// Get the minimum confidence threshold for voice recognition.
+    #[wasm_bindgen(js_name = getMinVoiceConfidence)]
+    #[must_use]
+    pub fn get_min_voice_confidence(&self) -> f32 {
+        self.input_fusion.config().min_confidence
+    }
+
+    /// Set the minimum confidence threshold for voice recognition.
+    ///
+    /// Voice events with confidence below this threshold will be ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `confidence` - Minimum confidence (0.0 to 1.0, default: 0.5)
+    #[wasm_bindgen(js_name = setMinVoiceConfidence)]
+    pub fn set_min_voice_confidence(&mut self, confidence: f32) {
+        self.input_fusion.set_config(FusionConfig {
+            min_confidence: confidence.clamp(0.0, 1.0),
+            ..self.input_fusion.config().clone()
+        });
     }
 }
 
