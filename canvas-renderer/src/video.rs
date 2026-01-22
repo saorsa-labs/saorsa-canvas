@@ -30,6 +30,15 @@ pub enum VideoTextureError {
     /// GPU texture creation failed.
     #[error("Failed to create video texture: {0}")]
     TextureCreation(String),
+
+    /// Frame dimensions would cause integer overflow.
+    #[error("Frame dimensions {width}x{height} would overflow")]
+    DimensionOverflow {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+    },
 }
 
 /// Result type for video texture operations.
@@ -51,13 +60,27 @@ pub struct VideoFrameData {
 }
 
 impl VideoFrameData {
+    /// Calculate the expected byte size for a frame, with overflow checking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dimensions would cause integer overflow.
+    fn checked_frame_size(width: u32, height: u32) -> VideoTextureResult<usize> {
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(VideoTextureError::DimensionOverflow { width, height })
+    }
+
     /// Create a new video frame from RGBA data.
     ///
     /// # Errors
     ///
-    /// Returns an error if the data length doesn't match width * height * 4.
+    /// Returns an error if:
+    /// - The dimensions would cause integer overflow
+    /// - The data length doesn't match width * height * 4
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> VideoTextureResult<Self> {
-        let expected = (width as usize) * (height as usize) * 4;
+        let expected = Self::checked_frame_size(width, height)?;
         if data.len() != expected {
             return Err(VideoTextureError::InvalidFrameData {
                 expected,
@@ -75,21 +98,25 @@ impl VideoFrameData {
     /// Create a placeholder frame with a solid color.
     ///
     /// Used when a video stream is not yet available.
-    #[must_use]
-    pub fn placeholder(width: u32, height: u32) -> Self {
-        let pixel_count = (width as usize) * (height as usize);
-        let mut data = Vec::with_capacity(pixel_count * 4);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dimensions would cause integer overflow.
+    pub fn placeholder(width: u32, height: u32) -> VideoTextureResult<Self> {
+        let byte_size = Self::checked_frame_size(width, height)?;
+        let pixel_count = byte_size / 4;
+        let mut data = Vec::with_capacity(byte_size);
 
         // Create a dark gray placeholder (similar to video player background)
         for _ in 0..pixel_count {
             data.extend_from_slice(&[32, 32, 32, 255]); // Dark gray
         }
 
-        Self {
+        Ok(Self {
             width,
             height,
             data,
-        }
+        })
     }
 
     /// Check if the frame dimensions are valid (non-zero).
@@ -244,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_video_frame_placeholder() {
-        let frame = VideoFrameData::placeholder(640, 480);
+        let frame = VideoFrameData::placeholder(640, 480).expect("Should create placeholder");
         assert_eq!(frame.width, 640);
         assert_eq!(frame.height, 480);
         assert_eq!(frame.data.len(), 640 * 480 * 4);
@@ -252,6 +279,28 @@ mod tests {
 
         // Check that it's dark gray
         assert_eq!(&frame.data[0..4], &[32, 32, 32, 255]);
+    }
+
+    #[test]
+    fn test_video_frame_dimension_overflow() {
+        // Test that extremely large dimensions are rejected
+        let result = VideoFrameData::new(u32::MAX, u32::MAX, vec![]);
+        assert!(result.is_err());
+
+        match result {
+            Err(VideoTextureError::DimensionOverflow { width, height }) => {
+                assert_eq!(width, u32::MAX);
+                assert_eq!(height, u32::MAX);
+            }
+            _ => panic!("Expected DimensionOverflow error"),
+        }
+
+        // Placeholder should also reject overflow dimensions
+        let result = VideoFrameData::placeholder(u32::MAX, u32::MAX);
+        assert!(matches!(
+            result,
+            Err(VideoTextureError::DimensionOverflow { .. })
+        ));
     }
 
     #[test]
@@ -263,7 +312,7 @@ mod tests {
         assert!(!manager.has_texture("stream-1"));
 
         // Add a texture
-        let frame = VideoFrameData::placeholder(320, 240);
+        let frame = VideoFrameData::placeholder(320, 240).expect("Should create placeholder");
         manager.update_texture("stream-1", &frame);
 
         assert_eq!(manager.texture_count(), 1);
@@ -278,7 +327,7 @@ mod tests {
         assert_eq!(entry.last_updated, 1);
 
         // Update the same stream
-        let frame2 = VideoFrameData::placeholder(640, 480);
+        let frame2 = VideoFrameData::placeholder(640, 480).expect("Should create placeholder");
         manager.update_texture("stream-1", &frame2);
 
         let entry = manager.get_texture("stream-1").expect("Entry should exist");
@@ -308,7 +357,7 @@ mod tests {
     fn test_video_texture_manager_stream_ids() {
         let mut manager = VideoTextureManager::new();
 
-        let frame = VideoFrameData::placeholder(100, 100);
+        let frame = VideoFrameData::placeholder(100, 100).expect("Should create placeholder");
         manager.update_texture("a", &frame);
         manager.update_texture("b", &frame);
         manager.update_texture("c", &frame);

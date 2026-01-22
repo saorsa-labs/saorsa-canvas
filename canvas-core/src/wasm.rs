@@ -106,7 +106,9 @@ mod tests {
     #[test]
     fn get_scene_json_returns_valid_json() {
         let canvas = WasmCanvas::new();
-        let json = canvas.get_scene_json().expect("get_scene_json should succeed");
+        let json = canvas
+            .get_scene_json()
+            .expect("get_scene_json should succeed");
         let parsed: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&json);
         assert!(parsed.is_ok(), "Scene JSON should be valid");
     }

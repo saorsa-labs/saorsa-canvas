@@ -1198,7 +1198,7 @@ impl WgpuBackend {
     ///
     /// # Errors
     ///
-    /// Returns an error if the texture cannot be created.
+    /// Returns an error if the texture cannot be created or dimensions overflow.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn update_video_frame(
         &mut self,
@@ -1207,7 +1207,14 @@ impl WgpuBackend {
         height: u32,
         rgba_data: &[u8],
     ) -> RenderResult<()> {
-        let expected_size = (width as usize) * (height as usize) * 4;
+        let expected_size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                RenderError::Frame(format!(
+                    "Video frame dimensions {width}x{height} would overflow"
+                ))
+            })?;
         if rgba_data.len() != expected_size {
             return Err(RenderError::Frame(format!(
                 "Invalid video frame data size: expected {expected_size}, got {}",
