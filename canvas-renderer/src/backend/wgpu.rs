@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use canvas_core::{Element, ElementKind, Scene};
+use canvas_core::{Element, ElementId, ElementKind, Scene};
 use wgpu::util::DeviceExt;
 
 use crate::chart::{parse_chart_config, render_chart_to_buffer};
@@ -930,17 +930,34 @@ impl WgpuBackend {
         self.configure_surface(surface, width, height)
     }
 
-    /// Render a single element as a colored quad.
+    /// Render a single element as a colored quad with optional opacity.
     #[allow(clippy::cast_precision_loss)] // Canvas dimensions fit in f32 mantissa (max ~16M)
-    fn render_element_quad(
+    fn render_element_quad_with_opacity(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         element: &Element,
         is_first: bool,
+        opacity: f32,
     ) {
         // Determine element color based on kind
-        let color = Self::get_element_color(element);
+        let mut color = Self::get_element_color(element);
+        // Apply opacity multiplier from parent OverlayLayer
+        color[3] *= opacity;
+
+        self.render_element_quad_impl(encoder, view, element, is_first, color);
+    }
+
+    /// Render a single element as a colored quad (implementation).
+    #[allow(clippy::cast_precision_loss)] // Canvas dimensions fit in f32 mantissa (max ~16M)
+    fn render_element_quad_impl(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        element: &Element,
+        is_first: bool,
+        color: [f32; 4],
+    ) {
 
         // Create uniforms
         let uniforms = QuadUniforms {
@@ -997,17 +1014,18 @@ impl WgpuBackend {
         render_pass.draw_indexed(0..6, 0, 0..1);
     }
 
-    /// Render a single element as a textured quad.
+    /// Render a single element as a textured quad with optional opacity.
     #[allow(clippy::cast_precision_loss)] // Canvas dimensions fit in f32 mantissa (max ~16M)
-    fn render_textured_element(
+    fn render_textured_element_with_opacity(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         element: &Element,
         texture_view: &wgpu::TextureView,
         is_first: bool,
+        opacity: f32,
     ) {
-        // Create uniforms (color is not used for textured rendering but keep struct compatible)
+        // Create uniforms with opacity applied to alpha channel
         let uniforms = QuadUniforms {
             transform: [
                 element.transform.x,
@@ -1016,7 +1034,7 @@ impl WgpuBackend {
                 element.transform.height,
             ],
             canvas_size: [self.width as f32, self.height as f32, 0.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0], // White (texture color will be used as-is)
+            color: [1.0, 1.0, 1.0, opacity], // Apply opacity to alpha channel
         };
 
         // Update uniform buffer
@@ -1332,6 +1350,11 @@ impl WgpuBackend {
             return;
         }
 
+        // Build opacity map from OverlayLayers.
+        // Children of an OverlayLayer inherit its opacity.
+        // Nested overlays multiply opacities (parent * child).
+        let opacity_map = Self::build_opacity_map(&elements);
+
         // First pass: Prepare textures for Chart, Image, and Video elements.
         // Note: Texture preparation errors are logged but not propagated to avoid
         // a single failed element from blocking the entire render loop. The element
@@ -1362,14 +1385,66 @@ impl WgpuBackend {
             let is_first = i == 0;
             let key = element.id.to_string();
 
+            // Skip OverlayLayer containers - they're invisible, only their children render
+            if matches!(element.kind, ElementKind::OverlayLayer { .. }) {
+                continue;
+            }
+
+            // Get opacity from parent OverlayLayer(s), default to 1.0
+            let opacity = opacity_map.get(&element.id).copied().unwrap_or(1.0);
+
             // Check if we have a cached texture for this element
             if let Some(cached) = self.texture_cache.get(&key) {
-                self.render_textured_element(encoder, view, element, &cached.view, is_first);
+                self.render_textured_element_with_opacity(
+                    encoder, view, element, &cached.view, is_first, opacity,
+                );
             } else {
                 // Fallback to colored quad for non-textured elements
-                self.render_element_quad(encoder, view, element, is_first);
+                self.render_element_quad_with_opacity(encoder, view, element, is_first, opacity);
             }
         }
+    }
+
+    /// Build a map of element ID to inherited opacity from parent `OverlayLayer`s.
+    ///
+    /// Handles nested overlays by multiplying opacities.
+    fn build_opacity_map(elements: &[Element]) -> HashMap<ElementId, f32> {
+        let mut opacity_map = HashMap::new();
+
+        // Create a lookup from element ID to element for nested resolution
+        let element_lookup: HashMap<_, _> = elements.iter().map(|e| (e.id, e)).collect();
+
+        // Process each OverlayLayer
+        for element in elements {
+            if let ElementKind::OverlayLayer { children, opacity } = &element.kind {
+                // Get the overlay's own inherited opacity (in case it's nested)
+                let parent_opacity = opacity_map.get(&element.id).copied().unwrap_or(1.0);
+                let effective_opacity = parent_opacity * opacity;
+
+                // Apply to all children
+                for child_id in children {
+                    let child_opacity = opacity_map.get(child_id).copied().unwrap_or(1.0);
+                    opacity_map.insert(*child_id, child_opacity * effective_opacity);
+
+                    // If the child is also an OverlayLayer, propagate to its children
+                    if let Some(child_element) = element_lookup.get(child_id) {
+                        if let ElementKind::OverlayLayer {
+                            children: grandchildren,
+                            ..
+                        } = &child_element.kind
+                        {
+                            for grandchild_id in grandchildren {
+                                let gc_opacity =
+                                    opacity_map.get(grandchild_id).copied().unwrap_or(1.0);
+                                opacity_map.insert(*grandchild_id, gc_opacity * effective_opacity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        opacity_map
     }
 
     /// Render to a texture (for headless/offscreen rendering).
