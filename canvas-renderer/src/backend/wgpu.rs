@@ -92,6 +92,56 @@ struct QuadUniforms {
     view_projection: [f32; 16],
 }
 
+/// Context for quilt rendering operations.
+///
+/// Groups viewport and canvas dimensions to reduce function parameter count
+/// and improve code readability in quilt rendering functions.
+#[derive(Debug, Clone, Copy)]
+struct QuiltRenderContext {
+    /// View-projection matrix for 3D transformation.
+    view_projection: [f32; 16],
+    /// Viewport X offset in the target texture.
+    viewport_x: u32,
+    /// Viewport Y offset in the target texture.
+    viewport_y: u32,
+    /// Viewport width.
+    viewport_width: u32,
+    /// Viewport height.
+    viewport_height: u32,
+    /// Total texture width (for shader uniform).
+    texture_width: u32,
+    /// Total texture height (for shader uniform).
+    texture_height: u32,
+}
+
+impl QuiltRenderContext {
+    /// Create a new quilt render context.
+    const fn new(
+        view_projection: [f32; 16],
+        viewport_x: u32,
+        viewport_y: u32,
+        viewport_width: u32,
+        viewport_height: u32,
+        texture_width: u32,
+        texture_height: u32,
+    ) -> Self {
+        Self {
+            view_projection,
+            viewport_x,
+            viewport_y,
+            viewport_width,
+            viewport_height,
+            texture_width,
+            texture_height,
+        }
+    }
+
+    /// Check if this is the first view (at origin).
+    const fn is_first_view(&self) -> bool {
+        self.viewport_x == 0 && self.viewport_y == 0
+    }
+}
+
 /// Cached texture with GPU resources.
 struct CachedTexture {
     /// The underlying GPU texture (kept alive to prevent deallocation).
@@ -1904,11 +1954,8 @@ impl WgpuBackend {
                 });
 
             // Render scene elements for this view
-            self.render_scene_elements_with_camera(
-                &mut encoder,
-                &texture_view,
-                scene,
-                &view_proj.data,
+            let ctx = QuiltRenderContext::new(
+                view_proj.data,
                 view.x_offset,
                 view.y_offset,
                 view.width,
@@ -1916,6 +1963,7 @@ impl WgpuBackend {
                 width,
                 height,
             );
+            self.render_scene_elements_with_camera(&mut encoder, &texture_view, scene, &ctx);
 
             self.queue.submit(std::iter::once(encoder.finish()));
         }
@@ -1998,25 +2046,19 @@ impl WgpuBackend {
     }
 
     /// Render scene elements with a specific camera and viewport to a texture.
-    #[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss)]
     fn render_scene_elements_with_camera(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         texture_view: &wgpu::TextureView,
         scene: &Scene,
-        view_projection: &[f32; 16],
-        viewport_x: u32,
-        viewport_y: u32,
-        viewport_width: u32,
-        viewport_height: u32,
-        texture_width: u32,
-        texture_height: u32,
+        ctx: &QuiltRenderContext,
     ) {
         let elements: Vec<_> = scene.elements().cloned().collect();
 
         if elements.is_empty() {
             // Just clear the viewport area
-            let load_op = if viewport_x == 0 && viewport_y == 0 {
+            let load_op = if ctx.is_first_view() {
                 wgpu::LoadOp::Clear(self.background_color)
             } else {
                 wgpu::LoadOp::Load
@@ -2038,20 +2080,24 @@ impl WgpuBackend {
             });
 
             render_pass.set_viewport(
-                viewport_x as f32,
-                viewport_y as f32,
-                viewport_width as f32,
-                viewport_height as f32,
+                ctx.viewport_x as f32,
+                ctx.viewport_y as f32,
+                ctx.viewport_width as f32,
+                ctx.viewport_height as f32,
                 0.0,
                 1.0,
             );
-            render_pass.set_scissor_rect(viewport_x, viewport_y, viewport_width, viewport_height);
+            render_pass.set_scissor_rect(
+                ctx.viewport_x,
+                ctx.viewport_y,
+                ctx.viewport_width,
+                ctx.viewport_height,
+            );
             return;
         }
 
         // Render each element with the view-projection matrix
         // Each element creates its own render pass to properly manage state
-        let is_first_view = viewport_x == 0 && viewport_y == 0;
         for (i, element) in elements.iter().enumerate() {
             // Skip OverlayLayer containers - they're invisible
             if matches!(element.kind, ElementKind::OverlayLayer { .. }) {
@@ -2059,21 +2105,9 @@ impl WgpuBackend {
             }
 
             // First element of first view clears the texture
-            let is_first_element = is_first_view && i == 0;
+            let is_first_element = ctx.is_first_view() && i == 0;
 
-            self.render_element_with_camera(
-                encoder,
-                texture_view,
-                element,
-                view_projection,
-                texture_width as f32,
-                texture_height as f32,
-                viewport_x,
-                viewport_y,
-                viewport_width,
-                viewport_height,
-                is_first_element,
-            );
+            self.render_element_with_camera(encoder, texture_view, element, ctx, is_first_element);
         }
     }
 
@@ -2082,19 +2116,13 @@ impl WgpuBackend {
     /// For quilt rendering, this renders elements as solid colored quads.
     /// Full support for textures, images, and other element types would require
     /// additional texture caching infrastructure for offscreen rendering.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::cast_precision_loss)]
     fn render_element_with_camera(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         texture_view: &wgpu::TextureView,
         element: &Element,
-        view_projection: &[f32; 16],
-        canvas_width: f32,
-        canvas_height: f32,
-        viewport_x: u32,
-        viewport_y: u32,
-        viewport_width: u32,
-        viewport_height: u32,
+        ctx: &QuiltRenderContext,
         is_first_element: bool,
     ) {
         let transform = [
@@ -2104,7 +2132,7 @@ impl WgpuBackend {
             element.transform.height,
         ];
         // use_camera = 1.0 to enable 3D mode
-        let canvas_size = [canvas_width, canvas_height, 1.0, 0.0];
+        let canvas_size = [ctx.texture_width as f32, ctx.texture_height as f32, 1.0, 0.0];
 
         // Default to a gray color for all elements (placeholder)
         // In a full implementation, we'd handle each element type
@@ -2114,7 +2142,7 @@ impl WgpuBackend {
             transform,
             canvas_size,
             color,
-            view_projection: *view_projection,
+            view_projection: ctx.view_projection,
         };
 
         // Update uniform buffer
@@ -2154,18 +2182,20 @@ impl WgpuBackend {
         });
 
         // Set viewport and scissor for this view
-        #[allow(clippy::cast_precision_loss)]
-        {
-            render_pass.set_viewport(
-                viewport_x as f32,
-                viewport_y as f32,
-                viewport_width as f32,
-                viewport_height as f32,
-                0.0,
-                1.0,
-            );
-        }
-        render_pass.set_scissor_rect(viewport_x, viewport_y, viewport_width, viewport_height);
+        render_pass.set_viewport(
+            ctx.viewport_x as f32,
+            ctx.viewport_y as f32,
+            ctx.viewport_width as f32,
+            ctx.viewport_height as f32,
+            0.0,
+            1.0,
+        );
+        render_pass.set_scissor_rect(
+            ctx.viewport_x,
+            ctx.viewport_y,
+            ctx.viewport_width,
+            ctx.viewport_height,
+        );
 
         render_pass.set_pipeline(&self.quad_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);

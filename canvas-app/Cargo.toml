@@ -58,3 +58,6 @@ thiserror.workspace = true
 
 # UUID - for parsing only. Do NOT call Uuid::new_v4() here; use canvas-core for generation.
 uuid.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

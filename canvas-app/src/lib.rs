@@ -55,6 +55,24 @@ pub fn init_wasm() {
     tracing::info!("Saorsa Canvas WASM initialized");
 }
 
+/// Helper to set a property on a JS object with debug logging on failure.
+///
+/// In debug builds, logs a warning to the browser console if the property
+/// cannot be set (e.g., if the object is frozen or the property is read-only).
+fn js_set_property(obj: &js_sys::Object, key: &str, value: &JsValue) {
+    if let Err(e) = js_sys::Reflect::set(obj, &JsValue::from_str(key), value) {
+        // Log to browser console in debug mode
+        #[cfg(debug_assertions)]
+        web_sys::console::warn_2(
+            &JsValue::from_str(&format!("Failed to set JS property '{key}': ")),
+            &e,
+        );
+        // In release mode, we just ignore the error silently
+        #[cfg(not(debug_assertions))]
+        let _ = e;
+    }
+}
+
 /// Cached video frame data.
 struct VideoFrame {
     /// RGBA pixel data.
@@ -709,39 +727,39 @@ impl CanvasApp {
         match &self.holographic_config {
             Some(config) => {
                 let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("width"),
+                    "width",
                     &JsValue::from_f64(f64::from(config.quilt_width())),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("height"),
+                    "height",
                     &JsValue::from_f64(f64::from(config.quilt_height())),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("views"),
+                    "views",
                     &JsValue::from_f64(f64::from(config.num_views)),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("columns"),
+                    "columns",
                     &JsValue::from_f64(f64::from(config.quilt_columns)),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("rows"),
+                    "rows",
                     &JsValue::from_f64(f64::from(config.quilt_rows)),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("viewWidth"),
+                    "viewWidth",
                     &JsValue::from_f64(f64::from(config.view_width)),
                 );
-                let _ = js_sys::Reflect::set(
+                js_set_property(
                     &obj,
-                    &JsValue::from_str("viewHeight"),
+                    "viewHeight",
                     &JsValue::from_f64(f64::from(config.view_height)),
                 );
                 obj.into()
@@ -832,41 +850,21 @@ impl CanvasApp {
         let (col, row) = config.view_to_grid(view_index);
 
         let obj = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(
+        js_set_property(&obj, "index", &JsValue::from_f64(f64::from(view_index)));
+        js_set_property(&obj, "xOffset", &JsValue::from_f64(f64::from(x_offset)));
+        js_set_property(&obj, "yOffset", &JsValue::from_f64(f64::from(y_offset)));
+        js_set_property(
             &obj,
-            &JsValue::from_str("index"),
-            &JsValue::from_f64(f64::from(view_index)),
-        );
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str("xOffset"),
-            &JsValue::from_f64(f64::from(x_offset)),
-        );
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str("yOffset"),
-            &JsValue::from_f64(f64::from(y_offset)),
-        );
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str("width"),
+            "width",
             &JsValue::from_f64(f64::from(config.view_width)),
         );
-        let _ = js_sys::Reflect::set(
+        js_set_property(
             &obj,
-            &JsValue::from_str("height"),
+            "height",
             &JsValue::from_f64(f64::from(config.view_height)),
         );
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str("column"),
-            &JsValue::from_f64(f64::from(col)),
-        );
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str("row"),
-            &JsValue::from_f64(f64::from(row)),
-        );
+        js_set_property(&obj, "column", &JsValue::from_f64(f64::from(col)));
+        js_set_property(&obj, "row", &JsValue::from_f64(f64::from(row)));
 
         obj.into()
     }
@@ -885,24 +883,24 @@ impl CanvasApp {
 
         let stats = renderer.stats();
         let obj = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(
+        js_set_property(
             &obj,
-            &JsValue::from_str("framesRendered"),
+            "framesRendered",
             &JsValue::from_f64(stats.frames_rendered as f64),
         );
-        let _ = js_sys::Reflect::set(
+        js_set_property(
             &obj,
-            &JsValue::from_str("avgRenderTimeMs"),
+            "avgRenderTimeMs",
             &JsValue::from_f64(stats.avg_render_time_ms),
         );
-        let _ = js_sys::Reflect::set(
+        js_set_property(
             &obj,
-            &JsValue::from_str("peakRenderTimeMs"),
+            "peakRenderTimeMs",
             &JsValue::from_f64(stats.peak_render_time_ms),
         );
-        let _ = js_sys::Reflect::set(
+        js_set_property(
             &obj,
-            &JsValue::from_str("totalViewsRendered"),
+            "totalViewsRendered",
             &JsValue::from_f64(stats.total_views_rendered as f64),
         );
 
@@ -1082,4 +1080,405 @@ pub fn create_video_element(
     });
 
     serde_json::to_string(&element).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    // ============================================================================
+    // Holographic Configuration Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_config_portrait() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        // Initially not in holographic mode
+        assert!(!app.is_holographic_mode());
+
+        // Set holographic config
+        app.set_holographic_config("portrait".to_string());
+
+        // Now should be in holographic mode
+        assert!(app.is_holographic_mode());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_config_4k() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        app.set_holographic_config("4k".to_string());
+
+        assert!(app.is_holographic_mode());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_config_8k() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        app.set_holographic_config("8k".to_string());
+
+        assert!(app.is_holographic_mode());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_config_go() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        app.set_holographic_config("go".to_string());
+
+        assert!(app.is_holographic_mode());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_config_unknown_defaults_to_portrait() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        // Unknown preset should default to portrait
+        app.set_holographic_config("unknown_preset".to_string());
+
+        assert!(app.is_holographic_mode());
+    }
+
+    // ============================================================================
+    // Quilt Dimensions Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_dimensions_portrait() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        let dims = app.get_quilt_dimensions();
+
+        // Portrait preset: 5 cols × 420px = 2100, 9 rows × 560px = 5040
+        assert_eq!(js_sys::Reflect::get(&dims, &"width".into()).unwrap(), 2100);
+        assert_eq!(js_sys::Reflect::get(&dims, &"height".into()).unwrap(), 5040);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_dimensions_4k() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("4k".to_string());
+
+        let dims = app.get_quilt_dimensions();
+
+        // 4K preset: 5 cols × 819px = 4095, 9 rows × 455px = 4095
+        assert_eq!(js_sys::Reflect::get(&dims, &"width".into()).unwrap(), 4095);
+        assert_eq!(js_sys::Reflect::get(&dims, &"height".into()).unwrap(), 4095);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_dimensions_not_in_holographic_mode() {
+        let app = CanvasApp::new(800.0, 600.0);
+
+        let dims = app.get_quilt_dimensions();
+
+        // Not in holographic mode, should return 0x0
+        assert_eq!(js_sys::Reflect::get(&dims, &"width".into()).unwrap(), 0);
+        assert_eq!(js_sys::Reflect::get(&dims, &"height".into()).unwrap(), 0);
+    }
+
+    // ============================================================================
+    // Holographic Camera Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_camera() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Set camera position and target
+        app.set_holographic_camera(
+            0.0, 0.0, 5.0, // position
+            0.0, 0.0, 0.0, // target
+            0.0, 1.0, 0.0, // up
+        );
+
+        // Should still be in holographic mode
+        assert!(app.is_holographic_mode());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_set_holographic_camera_not_in_holographic_mode() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        // Set camera without holographic mode enabled (should be a no-op)
+        app.set_holographic_camera(
+            0.0, 0.0, 5.0, // position
+            0.0, 0.0, 0.0, // target
+            0.0, 1.0, 0.0, // up
+        );
+
+        // Should still not be in holographic mode
+        assert!(!app.is_holographic_mode());
+    }
+
+    // ============================================================================
+    // Holographic Preset Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_get_holographic_preset_portrait() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        let preset = app.get_holographic_preset();
+
+        // Verify preset structure
+        assert_eq!(
+            js_sys::Reflect::get(&preset, &"numViews".into()).unwrap(),
+            45
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&preset, &"quiltColumns".into()).unwrap(),
+            5
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&preset, &"quiltRows".into()).unwrap(),
+            9
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&preset, &"viewWidth".into()).unwrap(),
+            420
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&preset, &"viewHeight".into()).unwrap(),
+            560
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_holographic_preset_not_in_mode() {
+        let app = CanvasApp::new(800.0, 600.0);
+
+        let preset = app.get_holographic_preset();
+
+        // Not in holographic mode, should return empty object
+        assert!(js_sys::Reflect::get(&preset, &"numViews".into())
+            .unwrap()
+            .is_undefined());
+    }
+
+    // ============================================================================
+    // Quilt View Info Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_view_info_valid_index() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Get first view (index 0)
+        let view_info = app.get_quilt_view_info(0);
+
+        // Verify view info structure
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"index".into()).unwrap(),
+            0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"xOffset".into()).unwrap(),
+            0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"yOffset".into()).unwrap(),
+            0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"width".into()).unwrap(),
+            420
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"height".into()).unwrap(),
+            560
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_view_info_last_view() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Get last view (index 44 for portrait with 45 views)
+        let view_info = app.get_quilt_view_info(44);
+
+        assert_eq!(
+            js_sys::Reflect::get(&view_info, &"index".into()).unwrap(),
+            44
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_view_info_out_of_bounds() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Get view with invalid index (> 44)
+        let view_info = app.get_quilt_view_info(100);
+
+        // Out of bounds should return empty object
+        assert!(js_sys::Reflect::get(&view_info, &"index".into())
+            .unwrap()
+            .is_undefined());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_quilt_view_info_not_in_holographic_mode() {
+        let app = CanvasApp::new(800.0, 600.0);
+
+        let view_info = app.get_quilt_view_info(0);
+
+        // Not in holographic mode should return empty object
+        assert!(js_sys::Reflect::get(&view_info, &"index".into())
+            .unwrap()
+            .is_undefined());
+    }
+
+    // ============================================================================
+    // Holographic Stats Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_get_holographic_stats_initial() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        let stats = app.get_holographic_stats();
+
+        // Initial stats should be zero
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"framesRendered".into()).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"avgRenderTimeMs".into()).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"peakRenderTimeMs".into()).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"totalViewsRendered".into()).unwrap(),
+            0.0
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_holographic_stats_not_in_mode() {
+        let app = CanvasApp::new(800.0, 600.0);
+
+        let stats = app.get_holographic_stats();
+
+        // Not in holographic mode should still return valid object with zeros
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"framesRendered".into()).unwrap(),
+            0.0
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_reset_holographic_stats() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Reset stats (should not panic even with no renders)
+        app.reset_holographic_stats();
+
+        let stats = app.get_holographic_stats();
+        assert_eq!(
+            js_sys::Reflect::get(&stats, &"framesRendered".into()).unwrap(),
+            0.0
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_reset_holographic_stats_not_in_mode() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        // Reset stats without holographic mode (should be a no-op)
+        app.reset_holographic_stats();
+
+        // Should not panic
+        assert!(!app.is_holographic_mode());
+    }
+
+    // ============================================================================
+    // Render Quilt Tests
+    // ============================================================================
+
+    #[wasm_bindgen_test]
+    fn test_render_quilt_returns_pixels() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        let result = app.render_quilt();
+
+        // Should return a Uint8ClampedArray with pixel data
+        // Portrait: 2100 × 5040 × 4 (RGBA) = 42,336,000 bytes
+        let array = js_sys::Uint8ClampedArray::from(result);
+        assert!(array.length() > 0);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_render_quilt_not_in_holographic_mode() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+
+        let result = app.render_quilt();
+
+        // Not in holographic mode should return empty array
+        let array = js_sys::Uint8ClampedArray::from(result);
+        assert_eq!(array.length(), 0);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_render_quilt_updates_stats() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Render once
+        let _ = app.render_quilt();
+
+        let stats = app.get_holographic_stats();
+        let frames: f64 = js_sys::Reflect::get(&stats, &"framesRendered".into())
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert_eq!(frames, 1.0);
+
+        let views: f64 = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert_eq!(views, 45.0); // Portrait has 45 views
+    }
+
+    #[wasm_bindgen_test]
+    fn test_render_quilt_multiple_frames() {
+        let mut app = CanvasApp::new(800.0, 600.0);
+        app.set_holographic_config("portrait".to_string());
+
+        // Render multiple times
+        for _ in 0..3 {
+            let _ = app.render_quilt();
+        }
+
+        let stats = app.get_holographic_stats();
+        let frames: f64 = js_sys::Reflect::get(&stats, &"framesRendered".into())
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert_eq!(frames, 3.0);
+
+        let views: f64 = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert_eq!(views, 135.0); // 45 views × 3 frames
+    }
 }
