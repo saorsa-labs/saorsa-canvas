@@ -31,4 +31,8 @@ pub enum RenderError {
     /// Rendering frame failed.
     #[error("Frame render failed: {0}")]
     Frame(String),
+
+    /// Invalid viewport configuration.
+    #[error("Invalid viewport: {0}")]
+    Viewport(String),
 }

@@ -88,6 +88,41 @@ struct CachedTexture {
     view: wgpu::TextureView,
 }
 
+/// Viewport configuration for rendering.
+///
+/// Defines a rectangular region within the canvas where rendering occurs.
+/// Elements outside the viewport are clipped by the scissor test.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    /// X offset in pixels from the left edge.
+    pub x: u32,
+    /// Y offset in pixels from the top edge.
+    pub y: u32,
+    /// Width of the viewport in pixels.
+    pub width: u32,
+    /// Height of the viewport in pixels.
+    pub height: u32,
+}
+
+impl Viewport {
+    /// Create a new viewport with the given bounds.
+    #[must_use]
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Check if the viewport has valid dimensions (non-zero area).
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+}
+
 /// wgpu-based GPU renderer.
 pub struct WgpuBackend {
     device: Arc<wgpu::Device>,
@@ -116,6 +151,8 @@ pub struct WgpuBackend {
     background_color: wgpu::Color,
     /// Display scale factor (1.0 = standard, 2.0 = Retina)
     scale_factor: f64,
+    /// Current viewport for rendering (None = full canvas).
+    current_viewport: Option<Viewport>,
 }
 
 impl WgpuBackend {
@@ -250,6 +287,7 @@ impl WgpuBackend {
                 a: 1.0,
             },
             scale_factor: 1.0,
+            current_viewport: None,
         })
     }
 
@@ -314,6 +352,7 @@ impl WgpuBackend {
                 a: 1.0,
             },
             scale_factor: 1.0,
+            current_viewport: None,
         })
     }
 
@@ -458,6 +497,7 @@ impl WgpuBackend {
                 a: 1.0,
             },
             scale_factor,
+            current_viewport: None,
         })
     }
 
@@ -832,6 +872,89 @@ impl WgpuBackend {
         }
     }
 
+    /// Set the viewport for subsequent rendering operations.
+    ///
+    /// The viewport defines a rectangular region within the canvas where
+    /// rendering will occur. Elements outside the viewport are clipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the viewport bounds are invalid:
+    /// - Zero width or height
+    /// - Viewport extends beyond canvas bounds
+    pub fn set_viewport(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> crate::RenderResult<()> {
+        // Validate dimensions
+        if width == 0 || height == 0 {
+            return Err(crate::RenderError::Viewport(
+                "Viewport width and height must be greater than zero".to_string(),
+            ));
+        }
+
+        // Validate bounds
+        let max_x = x.saturating_add(width);
+        let max_y = y.saturating_add(height);
+
+        if max_x > self.width || max_y > self.height {
+            return Err(crate::RenderError::Viewport(format!(
+                "Viewport ({}, {}, {}x{}) extends beyond canvas bounds ({}x{})",
+                x, y, width, height, self.width, self.height
+            )));
+        }
+
+        self.current_viewport = Some(Viewport::new(x, y, width, height));
+        tracing::debug!("Viewport set to ({}, {}, {}x{})", x, y, width, height);
+        Ok(())
+    }
+
+    /// Reset the viewport to the full canvas.
+    ///
+    /// After calling this method, rendering will use the entire canvas.
+    pub fn reset_viewport(&mut self) {
+        if self.current_viewport.is_some() {
+            self.current_viewport = None;
+            tracing::debug!("Viewport reset to full canvas");
+        }
+    }
+
+    /// Get the current viewport, if any.
+    ///
+    /// Returns `None` if rendering uses the full canvas.
+    #[must_use]
+    pub fn viewport(&self) -> Option<Viewport> {
+        self.current_viewport
+    }
+
+    /// Apply the current viewport and scissor rect to a render pass.
+    ///
+    /// This should be called after setting the pipeline but before drawing.
+    #[allow(clippy::cast_precision_loss)] // Viewport dimensions fit in f32
+    fn apply_viewport_to_render_pass(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        let (x, y, width, height) = if let Some(vp) = self.current_viewport {
+            (vp.x, vp.y, vp.width, vp.height)
+        } else {
+            (0, 0, self.width, self.height)
+        };
+
+        // wgpu viewport uses f32 for coordinates and depths
+        render_pass.set_viewport(
+            x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+            0.0, // min_depth
+            1.0, // max_depth
+        );
+
+        // Scissor rect clips rendering to the viewport bounds
+        render_pass.set_scissor_rect(x, y, width, height);
+    }
+
     /// Get the wgpu device.
     #[must_use]
     pub fn device(&self) -> &Arc<wgpu::Device> {
@@ -1007,6 +1130,7 @@ impl WgpuBackend {
         });
 
         render_pass.set_pipeline(&self.quad_pipeline);
+        self.apply_viewport_to_render_pass(&mut render_pass);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -1083,6 +1207,7 @@ impl WgpuBackend {
         });
 
         render_pass.set_pipeline(&self.textured_pipeline);
+        self.apply_viewport_to_render_pass(&mut render_pass);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -1630,3 +1755,42 @@ impl RenderBackend for WgpuBackend {
 
 // Re-export wgpu types for surface creation
 pub use wgpu;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_viewport_new() {
+        let vp = Viewport::new(10, 20, 100, 200);
+        assert_eq!(vp.x, 10);
+        assert_eq!(vp.y, 20);
+        assert_eq!(vp.width, 100);
+        assert_eq!(vp.height, 200);
+    }
+
+    #[test]
+    fn test_viewport_is_valid() {
+        assert!(Viewport::new(0, 0, 100, 100).is_valid());
+        assert!(Viewport::new(10, 10, 1, 1).is_valid());
+        assert!(!Viewport::new(0, 0, 0, 100).is_valid());
+        assert!(!Viewport::new(0, 0, 100, 0).is_valid());
+        assert!(!Viewport::new(0, 0, 0, 0).is_valid());
+    }
+
+    #[test]
+    fn test_viewport_equality() {
+        let vp1 = Viewport::new(10, 20, 100, 200);
+        let vp2 = Viewport::new(10, 20, 100, 200);
+        let vp3 = Viewport::new(10, 20, 100, 201);
+        assert_eq!(vp1, vp2);
+        assert_ne!(vp1, vp3);
+    }
+
+    #[test]
+    fn test_viewport_copy() {
+        let vp1 = Viewport::new(10, 20, 100, 200);
+        let vp2 = vp1;
+        assert_eq!(vp1, vp2);
+    }
+}
