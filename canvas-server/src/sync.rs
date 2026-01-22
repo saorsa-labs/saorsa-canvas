@@ -1749,27 +1749,57 @@ impl SyncProcessor {
     fn apply_operation(&self, session_id: &str, operation: &Operation) -> Result<(), SyncError> {
         match operation {
             Operation::AddElement { element, .. } => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %element.id,
+                    "apply_operation: AddElement"
+                );
                 self.store.add_element(session_id, element.clone())?;
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %element.id,
+                    "apply_operation: AddElement succeeded"
+                );
             }
             Operation::UpdateElement { id, changes, .. } => {
-                // For now, updates are applied via a simple get/modify/put pattern
-                // This is a stub that validates the element exists
-                let scene = self
-                    .store
-                    .get(session_id)
-                    .ok_or_else(|| SyncError::SessionNotFound(session_id.to_string()))?;
-                let _existing = scene
-                    .get_element(*id)
-                    .ok_or_else(|| SyncError::ElementNotFound(id.to_string()))?;
-                // Actual update logic would merge changes here
-                let _ = changes; // Placeholder for merge implementation
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %id,
+                    changes = %changes,
+                    "apply_operation: UpdateElement"
+                );
+                // Clone changes for the closure
+                let changes_clone = changes.clone();
+                self.store.update_element(session_id, *id, |element| {
+                    apply_changes_to_element(element, &changes_clone);
+                })?;
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %id,
+                    "apply_operation: UpdateElement succeeded"
+                );
             }
             Operation::RemoveElement { id, .. } => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %id,
+                    "apply_operation: RemoveElement"
+                );
                 self.store.remove_element(session_id, *id)?;
+                tracing::debug!(
+                    session_id = %session_id,
+                    element_id = %id,
+                    "apply_operation: RemoveElement succeeded"
+                );
             }
-            Operation::Interaction { .. } => {
-                // Interactions are events, not stored state changes
-                // They can be processed/broadcast but don't modify the store directly
+            Operation::Interaction { event, .. } => {
+                // Interactions are events, not stored state changes.
+                // They can be processed/broadcast but don't modify the store directly.
+                tracing::debug!(
+                    session_id = %session_id,
+                    event_type = ?event,
+                    "apply_operation: Interaction (logged only, no store modification)"
+                );
             }
         }
         Ok(())
@@ -3808,8 +3838,118 @@ mod tests {
 
         // Verify the failed operation was tracked with error details
         assert_eq!(result.failed_operations.len(), 1);
-        assert!(result.failed_operations[0]
-            .error
-            .contains("not found"));
+        assert!(result.failed_operations[0].error.contains("not found"));
+    }
+
+    #[test]
+    fn test_sync_processor_process_update_element() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // First, add an element
+        let element = Element::new(ElementKind::Text {
+            content: "Hello".to_string(),
+            font_size: 24.0,
+            color: "#000000".to_string(),
+        });
+        let element_id = element.id;
+        let add_op = Operation::AddElement {
+            element: element.clone(),
+            timestamp: Operation::now(),
+        };
+        let result = processor.process_batch("default", vec![add_op]);
+        assert_eq!(result.processed_count, 1);
+        assert!(result.success());
+
+        // Now update it
+        let changes = serde_json::json!({
+            "transform": {
+                "x": 100.0,
+                "y": 200.0
+            }
+        });
+        let update_op = Operation::UpdateElement {
+            id: element_id,
+            changes,
+            timestamp: Operation::now(),
+        };
+        let result = processor.process_batch("default", vec![update_op]);
+        assert_eq!(result.processed_count, 1);
+        assert!(result.success());
+
+        // Verify the element was updated
+        let scene = store.get("default").expect("scene should exist");
+        let updated = scene.get_element(element_id).expect("element should exist");
+        assert!((updated.transform.x - 100.0).abs() < f32::EPSILON);
+        assert!((updated.transform.y - 200.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sync_processor_process_remove_element() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // First, add an element
+        let element = Element::new(ElementKind::Text {
+            content: "ToRemove".to_string(),
+            font_size: 16.0,
+            color: "#ff0000".to_string(),
+        });
+        let element_id = element.id;
+        let add_op = Operation::AddElement {
+            element,
+            timestamp: Operation::now(),
+        };
+        let result = processor.process_batch("default", vec![add_op]);
+        assert!(result.success());
+
+        // Verify element exists
+        let scene = store.get("default").expect("scene should exist");
+        assert!(scene.get_element(element_id).is_some());
+
+        // Now remove it
+        let remove_op = Operation::RemoveElement {
+            id: element_id,
+            timestamp: Operation::now(),
+        };
+        let result = processor.process_batch("default", vec![remove_op]);
+        assert_eq!(result.processed_count, 1);
+        assert!(result.success());
+
+        // Verify element was removed
+        let scene = store.get("default").expect("scene should exist");
+        assert!(scene.get_element(element_id).is_none());
+    }
+
+    #[test]
+    fn test_sync_processor_process_interaction() {
+        use canvas_core::event::{InputEvent, TouchEvent, TouchPhase, TouchPoint};
+
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // Create an interaction operation
+        let touch_point = TouchPoint {
+            id: 1,
+            x: 100.0,
+            y: 200.0,
+            pressure: None,
+            radius: None,
+        };
+        let touch_event = TouchEvent::new(TouchPhase::Start, vec![touch_point], 0);
+        let event = InputEvent::Touch(touch_event);
+        let interaction_op = Operation::Interaction {
+            event,
+            timestamp: Operation::now(),
+        };
+
+        // Process the interaction - it should succeed but not modify the store
+        let result = processor.process_batch("default", vec![interaction_op]);
+        assert_eq!(result.processed_count, 1);
+        assert!(result.success());
+
+        // The scene should still be empty (interactions do not add elements)
+        let document = store.scene_document("default");
+        assert!(document.elements.is_empty());
     }
 }
