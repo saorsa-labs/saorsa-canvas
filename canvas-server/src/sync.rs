@@ -2705,26 +2705,115 @@ fn element_from_data(data: &ElementDocument) -> Result<Element, SyncError> {
         .map_err(|_| SyncError::InvalidElementId(id))
 }
 
+/// Validate a numeric value is finite and within f32 range.
+///
+/// Returns `Some(value as f32)` if the value is finite and within f32 range,
+/// otherwise logs a warning and returns `None`.
+fn validate_f64_for_f32(value: f64, field_name: &str) -> Option<f32> {
+    if !value.is_finite() {
+        tracing::warn!(
+            field = %field_name,
+            value = ?value,
+            "apply_changes_to_element: ignoring non-finite value"
+        );
+        return None;
+    }
+
+    // Check if value is within f32 range (approximately ±3.4e38)
+    const F32_MAX: f64 = f32::MAX as f64;
+    if !(-F32_MAX..=F32_MAX).contains(&value) {
+        tracing::warn!(
+            field = %field_name,
+            value = %value,
+            "apply_changes_to_element: value out of f32 range, clamping"
+        );
+        // Clamp to f32 range instead of rejecting
+        return Some(value.clamp(-F32_MAX, F32_MAX) as f32);
+    }
+
+    Some(value as f32)
+}
+
 /// Apply JSON changes to an element.
+///
+/// Supported fields in the changes JSON:
+/// - `transform.x`, `transform.y`: Position (f32)
+/// - `transform.width`, `transform.height`: Dimensions (f32)
+/// - `transform.rotation`: Rotation in radians (f32)
+/// - `transform.z_index`: Layer ordering (i32)
+/// - `interactive`: Whether element responds to input (bool)
+///
+/// Unknown fields are logged at debug level and silently ignored for forward
+/// compatibility (newer clients may send fields older servers don't understand).
+/// Invalid values (NaN, Infinity, out-of-range) are logged and ignored.
 fn apply_changes_to_element(element: &mut Element, changes: &serde_json::Value) {
+    // Known top-level fields
+    const KNOWN_TOP_LEVEL: &[&str] = &["transform", "interactive"];
+    // Known transform fields
+    const KNOWN_TRANSFORM: &[&str] = &["x", "y", "width", "height", "rotation", "z_index"];
+
+    // Log unknown top-level fields at debug level
+    if let Some(obj) = changes.as_object() {
+        for key in obj.keys() {
+            if !KNOWN_TOP_LEVEL.contains(&key.as_str()) {
+                tracing::debug!(
+                    field = %key,
+                    "apply_changes_to_element: ignoring unknown top-level field"
+                );
+            }
+        }
+    }
+
     if let Some(transform) = changes.get("transform") {
+        // Log unknown transform fields
+        if let Some(obj) = transform.as_object() {
+            for key in obj.keys() {
+                if !KNOWN_TRANSFORM.contains(&key.as_str()) {
+                    tracing::debug!(
+                        field = %key,
+                        "apply_changes_to_element: ignoring unknown transform field"
+                    );
+                }
+            }
+        }
+
         if let Some(x) = transform.get("x").and_then(|v| v.as_f64()) {
-            element.transform.x = x as f32;
+            if let Some(validated) = validate_f64_for_f32(x, "transform.x") {
+                element.transform.x = validated;
+            }
         }
         if let Some(y) = transform.get("y").and_then(|v| v.as_f64()) {
-            element.transform.y = y as f32;
+            if let Some(validated) = validate_f64_for_f32(y, "transform.y") {
+                element.transform.y = validated;
+            }
         }
         if let Some(width) = transform.get("width").and_then(|v| v.as_f64()) {
-            element.transform.width = width as f32;
+            if let Some(validated) = validate_f64_for_f32(width, "transform.width") {
+                element.transform.width = validated;
+            }
         }
         if let Some(height) = transform.get("height").and_then(|v| v.as_f64()) {
-            element.transform.height = height as f32;
+            if let Some(validated) = validate_f64_for_f32(height, "transform.height") {
+                element.transform.height = validated;
+            }
         }
         if let Some(rotation) = transform.get("rotation").and_then(|v| v.as_f64()) {
-            element.transform.rotation = rotation as f32;
+            if let Some(validated) = validate_f64_for_f32(rotation, "transform.rotation") {
+                element.transform.rotation = validated;
+            }
         }
         if let Some(z_index) = transform.get("z_index").and_then(|v| v.as_i64()) {
-            element.transform.z_index = z_index as i32;
+            // i64 to i32 conversion - clamp to i32 range
+            #[allow(clippy::cast_possible_truncation)]
+            let clamped = z_index.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            if clamped != z_index as i32 {
+                tracing::warn!(
+                    original = %z_index,
+                    clamped = %clamped,
+                    "apply_changes_to_element: z_index out of i32 range, clamped"
+                );
+            }
+            element.transform.z_index = clamped;
         }
     }
 
@@ -3951,5 +4040,221 @@ mod tests {
         // The scene should still be empty (interactions do not add elements)
         let document = store.scene_document("default");
         assert!(document.elements.is_empty());
+    }
+
+    #[test]
+    fn test_sync_processor_update_nonexistent_element() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // Try to update an element that doesn't exist
+        let fake_id = canvas_core::ElementId::new();
+        let changes = serde_json::json!({
+            "transform": { "x": 100.0 }
+        });
+        let update_op = Operation::UpdateElement {
+            id: fake_id,
+            changes,
+            timestamp: Operation::now(),
+        };
+
+        let result = processor.process_batch("default", vec![update_op]);
+
+        // Should fail
+        assert!(!result.success());
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(result.failed_operations.len(), 1);
+        // Error should mention element not found
+        assert!(result.failed_operations[0].error.contains("not found"));
+    }
+
+    #[test]
+    fn test_apply_changes_ignores_nan_and_infinity() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let original_x = element.transform.x;
+        let original_y = element.transform.y;
+
+        // Try to set NaN value - should be ignored
+        let changes = serde_json::json!({
+            "transform": {
+                "x": f64::NAN,
+                "y": f64::INFINITY
+            }
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        // Values should remain unchanged
+        assert!((element.transform.x - original_x).abs() < f32::EPSILON);
+        assert!((element.transform.y - original_y).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_apply_changes_clamps_large_values() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+
+        // Try to set a value larger than f32::MAX
+        let huge_value = f64::from(f32::MAX) * 2.0;
+        let changes = serde_json::json!({
+            "transform": {
+                "x": huge_value
+            }
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        // Value should be clamped to f32::MAX
+        assert!((element.transform.x - f32::MAX).abs() < 1e30);
+    }
+
+    #[test]
+    fn test_apply_changes_ignores_unknown_fields() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+
+        // Include unknown fields alongside known ones
+        let changes = serde_json::json!({
+            "unknown_field": "should be ignored",
+            "another_unknown": 42,
+            "transform": {
+                "x": 100.0,
+                "unknown_transform_field": "also ignored"
+            }
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        // Known field should be applied
+        assert!((element.transform.x - 100.0).abs() < f32::EPSILON);
+        // Element should still be valid (no panic from unknown fields)
+        assert_eq!(element.transform.x, 100.0);
+    }
+
+    #[test]
+    fn test_apply_changes_partial_transform() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        // Set initial transform values
+        element.transform.x = 10.0;
+        element.transform.y = 20.0;
+        element.transform.width = 100.0;
+        element.transform.height = 50.0;
+
+        // Only update x, leave other fields unchanged
+        let changes = serde_json::json!({
+            "transform": {
+                "x": 500.0
+            }
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        // x should be updated
+        assert!((element.transform.x - 500.0).abs() < f32::EPSILON);
+        // Other fields should remain unchanged
+        assert!((element.transform.y - 20.0).abs() < f32::EPSILON);
+        assert!((element.transform.width - 100.0).abs() < f32::EPSILON);
+        assert!((element.transform.height - 50.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_apply_changes_all_transform_fields() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+
+        let changes = serde_json::json!({
+            "transform": {
+                "x": 100.0,
+                "y": 200.0,
+                "width": 300.0,
+                "height": 400.0,
+                "rotation": 1.57,
+                "z_index": 5
+            },
+            "interactive": true
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        assert!((element.transform.x - 100.0).abs() < f32::EPSILON);
+        assert!((element.transform.y - 200.0).abs() < f32::EPSILON);
+        assert!((element.transform.width - 300.0).abs() < f32::EPSILON);
+        assert!((element.transform.height - 400.0).abs() < f32::EPSILON);
+        assert!((element.transform.rotation - 1.57).abs() < f32::EPSILON);
+        assert_eq!(element.transform.z_index, 5);
+        assert!(element.interactive);
+    }
+
+    #[test]
+    fn test_apply_changes_z_index_clamping() {
+        let mut element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+
+        // Try to set z_index larger than i32::MAX
+        let huge_z = i64::from(i32::MAX) + 1000;
+        let changes = serde_json::json!({
+            "transform": {
+                "z_index": huge_z
+            }
+        });
+        apply_changes_to_element(&mut element, &changes);
+
+        // Should be clamped to i32::MAX
+        assert_eq!(element.transform.z_index, i32::MAX);
+    }
+
+    #[test]
+    fn test_sync_processor_mixed_success_and_failure_batch() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // Create a valid element
+        let element = Element::new(ElementKind::Text {
+            content: "Valid".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let valid_id = element.id;
+
+        // Create a batch with: add (success), update non-existent (fail), add another (success)
+        let fake_id = canvas_core::ElementId::new();
+        let operations = vec![
+            Operation::AddElement {
+                element,
+                timestamp: Operation::now(),
+            },
+            Operation::UpdateElement {
+                id: fake_id,
+                changes: serde_json::json!({"transform": {"x": 100.0}}),
+                timestamp: Operation::now(),
+            },
+            Operation::RemoveElement {
+                id: valid_id,
+                timestamp: Operation::now(),
+            },
+        ];
+
+        let result = processor.process_batch("default", operations);
+
+        // 2 successes, 1 failure
+        assert_eq!(result.processed_count, 2);
+        assert_eq!(result.failed_count, 1);
+        assert!(!result.success());
+        assert_eq!(result.failed_operations.len(), 1);
     }
 }
