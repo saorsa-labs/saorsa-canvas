@@ -92,7 +92,13 @@ struct CachedTexture {
 ///
 /// Defines a rectangular region within the canvas where rendering occurs.
 /// Elements outside the viewport are clipped by the scissor test.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// # Construction
+///
+/// - Use [`Viewport::new()`] for const construction (does not validate).
+/// - Use [`Viewport::try_new()`] to validate dimensions (returns error for zero width/height).
+/// - Use [`WgpuBackend::set_viewport()`] for bounds-checked viewport setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Viewport {
     /// X offset in pixels from the left edge.
     pub x: u32,
@@ -106,6 +112,9 @@ pub struct Viewport {
 
 impl Viewport {
     /// Create a new viewport with the given bounds.
+    ///
+    /// This constructor does not validate dimensions. Use [`Self::try_new()`]
+    /// for validation or [`WgpuBackend::set_viewport()`] for bounds checking.
     #[must_use]
     pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
@@ -114,6 +123,27 @@ impl Viewport {
             width,
             height,
         }
+    }
+
+    /// Create a new viewport with validation.
+    ///
+    /// Returns an error if width or height is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::Viewport`] if dimensions are invalid.
+    pub fn try_new(x: u32, y: u32, width: u32, height: u32) -> crate::RenderResult<Self> {
+        if width == 0 || height == 0 {
+            return Err(crate::RenderError::Viewport(
+                "Viewport width and height must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 
     /// Check if the viewport has valid dimensions (non-zero area).
@@ -915,11 +945,13 @@ impl WgpuBackend {
     /// Reset the viewport to the full canvas.
     ///
     /// After calling this method, rendering will use the entire canvas.
-    pub fn reset_viewport(&mut self) {
-        if self.current_viewport.is_some() {
-            self.current_viewport = None;
+    /// Returns the previous viewport if one was set.
+    pub fn reset_viewport(&mut self) -> Option<Viewport> {
+        let previous = self.current_viewport.take();
+        if previous.is_some() {
             tracing::debug!("Viewport reset to full canvas");
         }
+        previous
     }
 
     /// Get the current viewport, if any.
@@ -1742,6 +1774,24 @@ impl RenderBackend for WgpuBackend {
         self.width = width;
         self.height = height;
 
+        // Invalidate viewport if it extends beyond new canvas bounds
+        if let Some(vp) = self.current_viewport {
+            let max_x = vp.x.saturating_add(vp.width);
+            let max_y = vp.y.saturating_add(vp.height);
+            if max_x > width || max_y > height {
+                tracing::debug!(
+                    "Viewport ({}, {}, {}x{}) invalidated due to resize to {}x{}",
+                    vp.x,
+                    vp.y,
+                    vp.width,
+                    vp.height,
+                    width,
+                    height
+                );
+                self.current_viewport = None;
+            }
+        }
+
         if let (Some(surface), Some(config)) = (&self.surface, &mut self.surface_config) {
             config.width = width;
             config.height = height;
@@ -1759,6 +1809,7 @@ pub use wgpu;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_viewport_new() {
@@ -1767,6 +1818,35 @@ mod tests {
         assert_eq!(vp.y, 20);
         assert_eq!(vp.width, 100);
         assert_eq!(vp.height, 200);
+    }
+
+    #[test]
+    fn test_viewport_try_new_valid() {
+        let vp = Viewport::try_new(10, 20, 100, 200);
+        assert!(vp.is_ok());
+        let vp = vp.unwrap();
+        assert_eq!(vp.x, 10);
+        assert_eq!(vp.y, 20);
+        assert_eq!(vp.width, 100);
+        assert_eq!(vp.height, 200);
+    }
+
+    #[test]
+    fn test_viewport_try_new_zero_width() {
+        let result = Viewport::try_new(0, 0, 0, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_viewport_try_new_zero_height() {
+        let result = Viewport::try_new(0, 0, 100, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_viewport_try_new_zero_both() {
+        let result = Viewport::try_new(0, 0, 0, 0);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1792,5 +1872,15 @@ mod tests {
         let vp1 = Viewport::new(10, 20, 100, 200);
         let vp2 = vp1;
         assert_eq!(vp1, vp2);
+    }
+
+    #[test]
+    fn test_viewport_eq_hashset() {
+        // Eq trait allows use in HashSet
+        let mut set = HashSet::new();
+        set.insert(Viewport::new(0, 0, 100, 100));
+        set.insert(Viewport::new(0, 0, 100, 100)); // Duplicate
+        set.insert(Viewport::new(10, 10, 200, 200));
+        assert_eq!(set.len(), 2);
     }
 }
