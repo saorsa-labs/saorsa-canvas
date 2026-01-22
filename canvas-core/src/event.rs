@@ -71,6 +71,50 @@ impl TouchEvent {
     }
 }
 
+/// A voice input event from speech recognition.
+///
+/// Represents transcribed speech from Web Speech API or similar
+/// speech recognition systems.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceEvent {
+    /// The recognized speech transcript.
+    pub transcript: String,
+    /// Confidence score (0.0 to 1.0).
+    pub confidence: f32,
+    /// Whether this is a final (committed) result.
+    ///
+    /// Interim results may change as speech recognition continues.
+    /// Final results are stable and ready for processing.
+    pub is_final: bool,
+    /// Timestamp when the speech was recognized (ms since epoch).
+    pub timestamp_ms: u64,
+}
+
+impl VoiceEvent {
+    /// Create a new voice event.
+    #[must_use]
+    pub fn new(transcript: String, confidence: f32, is_final: bool, timestamp_ms: u64) -> Self {
+        Self {
+            transcript,
+            confidence,
+            is_final,
+            timestamp_ms,
+        }
+    }
+
+    /// Create an interim (non-final) voice event.
+    #[must_use]
+    pub fn interim(transcript: String, confidence: f32, timestamp_ms: u64) -> Self {
+        Self::new(transcript, confidence, false, timestamp_ms)
+    }
+
+    /// Create a final voice event.
+    #[must_use]
+    pub fn final_result(transcript: String, confidence: f32, timestamp_ms: u64) -> Self {
+        Self::new(transcript, confidence, true, timestamp_ms)
+    }
+}
+
 /// Recognized gestures from touch input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "gesture", content = "data")]
@@ -171,15 +215,8 @@ pub enum InputEvent {
         modifiers: KeyModifiers,
     },
 
-    /// Voice command (transcribed text).
-    Voice {
-        /// Transcribed speech text.
-        transcript: String,
-        /// Confidence score (0.0 to 1.0).
-        confidence: f32,
-        /// Whether this is the final transcript.
-        is_final: bool,
-    },
+    /// Voice input from speech recognition.
+    Voice(VoiceEvent),
 }
 
 /// Keyboard modifiers.

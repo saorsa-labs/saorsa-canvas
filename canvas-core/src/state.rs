@@ -79,8 +79,8 @@ impl CanvasState {
             InputEvent::Gesture(gesture) => {
                 tracing::debug!("Gesture: {:?}", gesture);
             }
-            InputEvent::Voice { transcript, .. } => {
-                tracing::debug!("Voice command: {}", transcript);
+            InputEvent::Voice(voice) => {
+                tracing::debug!("Voice command: {}", voice.transcript);
             }
             _ => {}
         }

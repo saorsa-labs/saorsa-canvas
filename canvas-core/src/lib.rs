@@ -46,10 +46,8 @@ pub use element::{
     Resolution, Transform,
 };
 pub use error::{CanvasError, CanvasResult};
-pub use event::{InputEvent, TouchEvent, TouchPhase, TouchPoint};
-pub use fusion::{
-    FusedIntent, FusionConfig, FusionResult, InputFusion, VoiceEvent, VoiceOnlyIntent,
-};
+pub use event::{InputEvent, TouchEvent, TouchPhase, TouchPoint, VoiceEvent};
+pub use fusion::{FusedIntent, FusionConfig, FusionResult, InputFusion, VoiceOnlyIntent};
 pub use offline::{ConflictResolution, ConflictStrategy, OfflineQueue, Operation, SyncResult};
 pub use scene::Scene;
 pub use schema::{ElementDocument, SceneDocument, ViewportDocument};

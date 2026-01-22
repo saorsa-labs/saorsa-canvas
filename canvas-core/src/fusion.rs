@@ -11,22 +11,9 @@
 //! ```
 
 use crate::element::ElementId;
-use crate::event::{InputEvent, TouchEvent};
+use crate::event::{InputEvent, TouchEvent, VoiceEvent};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-
-/// A voice input event.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VoiceEvent {
-    /// The transcribed speech text.
-    pub transcript: String,
-    /// Confidence score (0.0 to 1.0).
-    pub confidence: f32,
-    /// Whether this is a final transcription.
-    pub is_final: bool,
-    /// Timestamp in milliseconds.
-    pub timestamp_ms: u64,
-}
 
 /// A fused intent combining touch and voice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,19 +184,7 @@ impl InputFusion {
     pub fn process(&mut self, event: &InputEvent) -> FusionResult {
         match event {
             InputEvent::Touch(touch) => self.process_touch(touch),
-            InputEvent::Voice {
-                transcript,
-                confidence,
-                is_final,
-            } => {
-                let voice = VoiceEvent {
-                    transcript: transcript.clone(),
-                    confidence: *confidence,
-                    is_final: *is_final,
-                    timestamp_ms: 0, // Will be set by caller if needed
-                };
-                self.process_voice(&voice)
-            }
+            InputEvent::Voice(voice) => self.process_voice(voice),
             _ => FusionResult::None,
         }
     }
