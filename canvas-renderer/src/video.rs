@@ -414,4 +414,66 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
+
+    #[test]
+    fn test_video_frame_data_getters() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let frame = VideoFrameData::new(2, 2, data.clone()).expect("Should create frame");
+
+        assert_eq!(frame.width(), 2);
+        assert_eq!(frame.height(), 2);
+        assert_eq!(frame.data(), data.as_slice());
+    }
+
+    #[test]
+    fn test_video_texture_entry_getters() {
+        let mut manager = VideoTextureManager::new();
+        let frame = VideoFrameData::placeholder(800, 600).expect("Should create placeholder");
+        manager.update_texture("test-stream", &frame);
+
+        let entry = manager.get_texture("test-stream").expect("Entry should exist");
+        assert_eq!(entry.width(), 800);
+        assert_eq!(entry.height(), 600);
+        assert_eq!(entry.last_updated(), 1);
+    }
+
+    #[test]
+    fn test_video_frame_zero_dimensions() {
+        // Zero width should produce empty data and be invalid
+        let result = VideoFrameData::new(0, 100, vec![]);
+        assert!(result.is_ok()); // Constructor succeeds but...
+
+        let frame = result.expect("Should create frame");
+        assert!(!frame.is_valid()); // ...frame is not valid
+
+        // Zero height same
+        let frame2 = VideoFrameData::new(100, 0, vec![]).expect("Should create frame");
+        assert!(!frame2.is_valid());
+    }
+
+    #[test]
+    fn test_video_texture_manager_frame_counter() {
+        let mut manager = VideoTextureManager::new();
+        assert_eq!(manager.frame_counter(), 0);
+
+        let frame = VideoFrameData::placeholder(100, 100).expect("Should create placeholder");
+
+        manager.update_texture("stream-1", &frame);
+        assert_eq!(manager.frame_counter(), 1);
+
+        manager.update_texture("stream-1", &frame);
+        assert_eq!(manager.frame_counter(), 2);
+
+        manager.update_texture("stream-2", &frame);
+        assert_eq!(manager.frame_counter(), 3);
+    }
+
+    #[test]
+    fn test_video_frame_missing_stream_behavior() {
+        let manager = VideoTextureManager::new();
+
+        // Accessing non-existent stream should return None, not panic
+        assert!(manager.get_texture("nonexistent").is_none());
+        assert!(!manager.has_texture("nonexistent"));
+    }
 }
