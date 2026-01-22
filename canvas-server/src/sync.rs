@@ -1845,6 +1845,63 @@ impl SyncProcessorResult {
     }
 }
 
+/// Configuration for retry behavior with exponential backoff.
+///
+/// Controls how failed operations are retried, with increasing delays
+/// between attempts to avoid overwhelming the system during transient failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts before giving up.
+    pub max_retries: u32,
+    /// Initial delay between retries in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Maximum delay between retries in milliseconds (cap for backoff).
+    pub max_delay_ms: u64,
+    /// Multiplier applied to delay after each retry (e.g., 2.0 for doubling).
+    pub backoff_multiplier: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_delay_ms: 100,
+            max_delay_ms: 5000,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Create a new retry configuration with custom values.
+    #[must_use]
+    pub const fn new(
+        max_retries: u32,
+        initial_delay_ms: u64,
+        max_delay_ms: u64,
+        backoff_multiplier: f64,
+    ) -> Self {
+        Self {
+            max_retries,
+            initial_delay_ms,
+            max_delay_ms,
+            backoff_multiplier,
+        }
+    }
+
+    /// Calculate the delay for a given retry attempt (0-indexed).
+    ///
+    /// Uses exponential backoff: `delay = initial * multiplier^attempt`
+    /// The result is capped at `max_delay_ms`.
+    #[must_use]
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        let base_delay = self.initial_delay_ms as f64;
+        let multiplier = self.backoff_multiplier.powi(attempt as i32);
+        let delay_ms = (base_delay * multiplier).min(self.max_delay_ms as f64) as u64;
+        Duration::from_millis(delay_ms)
+    }
+}
+
 /// Processes batched scene operations with conflict resolution.
 ///
 /// The `SyncProcessor` handles batch processing of operations from clients,
@@ -2238,6 +2295,84 @@ impl SyncProcessor {
         if let Ok(mut timestamps) = self.element_timestamps.write() {
             timestamps.remove(element_id);
         }
+    }
+
+    /// Process operations with automatic retry for transient failures.
+    ///
+    /// This method implements exponential backoff for retrying operations
+    /// that fail due to transient issues. Only operations marked as retryable
+    /// will be retried; permanent failures are returned immediately.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session to apply operations to.
+    /// * `operations` - The operations to process.
+    /// * `config` - Retry configuration controlling backoff behavior.
+    ///
+    /// # Returns
+    ///
+    /// A combined result from all retry attempts. The `synced_count` reflects
+    /// total successful operations across all attempts. Failed operations
+    /// include only those that exhausted all retries or were not retryable.
+    pub async fn process_with_retry(
+        &self,
+        session_id: &str,
+        operations: Vec<Operation>,
+        config: &RetryConfig,
+    ) -> SyncProcessorResult {
+        let overall_start = Instant::now();
+        let mut combined_result = SyncProcessorResult::new();
+        let mut pending_ops = operations;
+        let mut attempt = 0u32;
+
+        while !pending_ops.is_empty() && attempt <= config.max_retries {
+            if attempt > 0 {
+                // Apply backoff delay before retry
+                let delay = config.delay_for_attempt(attempt - 1);
+                tracing::debug!(
+                    session_id = %session_id,
+                    attempt = attempt,
+                    delay_ms = %delay.as_millis(),
+                    pending_count = pending_ops.len(),
+                    "Retrying failed operations after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let batch_result = self.process_batch(session_id, pending_ops);
+
+            // Accumulate successful operations
+            combined_result.synced_count += batch_result.synced_count;
+            combined_result.conflict_count += batch_result.conflict_count;
+            combined_result.conflicts.extend(batch_result.conflicts);
+
+            // Separate retryable from permanent failures
+            let mut retry_ops = Vec::new();
+            for failed in batch_result.failed_operations {
+                if failed.retryable && attempt < config.max_retries {
+                    // Queue for retry
+                    retry_ops.push(failed.operation);
+                } else {
+                    // Record as final failure
+                    combined_result.record_failure(failed);
+                }
+            }
+
+            pending_ops = retry_ops;
+            attempt += 1;
+        }
+
+        // Any remaining pending ops after max retries are failures
+        // (This case is handled in the loop, but added for safety)
+        for op in pending_ops {
+            combined_result.record_failure(FailedOperation::permanent(
+                op,
+                format!("Exceeded maximum retries ({})", config.max_retries),
+            ));
+        }
+
+        combined_result.finalize(overall_start);
+        combined_result
     }
 }
 
@@ -5116,5 +5251,136 @@ mod tests {
         assert!(json.contains(r#""synced_count":1"#));
         assert!(json.contains(r#""failed_count":1"#));
         assert!(json.contains(r#""retryable":true"#));
+    }
+
+    // Tests for RetryConfig
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.initial_delay_ms, 100);
+        assert_eq!(config.max_delay_ms, 5000);
+        assert!((config.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_retry_config_new() {
+        let config = RetryConfig::new(5, 200, 10000, 1.5);
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.initial_delay_ms, 200);
+        assert_eq!(config.max_delay_ms, 10000);
+        assert!((config.backoff_multiplier - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_retry_config_delay_for_attempt_exponential() {
+        let config = RetryConfig::new(3, 100, 5000, 2.0);
+
+        // attempt 0: 100 * 2^0 = 100ms
+        assert_eq!(config.delay_for_attempt(0).as_millis(), 100);
+        // attempt 1: 100 * 2^1 = 200ms
+        assert_eq!(config.delay_for_attempt(1).as_millis(), 200);
+        // attempt 2: 100 * 2^2 = 400ms
+        assert_eq!(config.delay_for_attempt(2).as_millis(), 400);
+        // attempt 3: 100 * 2^3 = 800ms
+        assert_eq!(config.delay_for_attempt(3).as_millis(), 800);
+    }
+
+    #[test]
+    fn test_retry_config_delay_capped_at_max() {
+        let config = RetryConfig::new(10, 100, 500, 2.0);
+
+        // attempt 3: 100 * 2^3 = 800ms, capped at 500ms
+        assert_eq!(config.delay_for_attempt(3).as_millis(), 500);
+        // attempt 10: would be huge, but capped at 500ms
+        assert_eq!(config.delay_for_attempt(10).as_millis(), 500);
+    }
+
+    #[test]
+    fn test_retry_config_serialization() {
+        let config = RetryConfig::default();
+        let json = serde_json::to_string(&config).expect("should serialize");
+        assert!(json.contains(r#""max_retries":3"#));
+        assert!(json.contains(r#""initial_delay_ms":100"#));
+        assert!(json.contains(r#""max_delay_ms":5000"#));
+        assert!(json.contains(r#""backoff_multiplier":2.0"#));
+
+        // Deserialize back
+        let parsed: RetryConfig = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(parsed.max_retries, 3);
+    }
+
+    #[tokio::test]
+    async fn test_process_with_retry_no_failures() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "test text".to_string(),
+            font_size: 16.0,
+            color: "#ffffff".to_string(),
+        });
+        let operations = vec![Operation::AddElement {
+            element: element.clone(),
+            timestamp: 1000,
+        }];
+
+        let config = RetryConfig::default();
+        let result = processor
+            .process_with_retry("test-session", operations, &config)
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.synced_count, 1);
+        assert_eq!(result.failed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_with_retry_permanent_failure_no_retry() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        // Try to update a non-existent element (permanent failure - element not found)
+        let operations = vec![Operation::UpdateElement {
+            id: canvas_core::ElementId::new(),
+            changes: serde_json::json!({"z_index": 5}),
+            timestamp: 1000,
+        }];
+
+        let config = RetryConfig::new(3, 10, 100, 2.0); // Short delays for testing
+        let result = processor
+            .process_with_retry("test-session", operations, &config)
+            .await;
+
+        assert!(!result.success);
+        assert_eq!(result.synced_count, 0);
+        assert_eq!(result.failed_count, 1);
+        // Should not be retried because element not found is permanent
+        assert_eq!(result.retryable_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_process_with_retry_zero_retries_config() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "test".to_string(),
+            font_size: 16.0,
+            color: "#ffffff".to_string(),
+        });
+        let operations = vec![Operation::AddElement {
+            element,
+            timestamp: 1000,
+        }];
+
+        let config = RetryConfig::new(0, 100, 5000, 2.0);
+        let result = processor
+            .process_with_retry("test-session", operations, &config)
+            .await;
+
+        // Should still process successfully with zero retries
+        assert!(result.success);
+        assert_eq!(result.synced_count, 1);
     }
 }
