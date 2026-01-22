@@ -11,6 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::chart::{parse_chart_config, render_chart_to_buffer};
 use crate::image::{create_placeholder, load_image_from_data_uri};
+use crate::spatial::Camera;
 use crate::{BackendType, RenderError, RenderResult};
 
 #[cfg(target_arch = "wasm32")]
@@ -67,16 +68,27 @@ const QUAD_VERTICES: &[Vertex] = &[
 /// Quad indices for two triangles.
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
+/// Identity matrix (4x4, column-major).
+#[rustfmt::skip]
+const IDENTITY_MATRIX: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+
 /// Uniform data for quad shader.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct QuadUniforms {
     /// Transform: x, y, width, height
     transform: [f32; 4],
-    /// Canvas dimensions: width, height, 0, 0
+    /// Canvas dimensions: width, height, `use_camera` (1.0 = yes), reserved
     canvas_size: [f32; 4],
     /// Element color: r, g, b, a
     color: [f32; 4],
+    /// View-projection matrix (column-major, 4x4)
+    view_projection: [f32; 16],
 }
 
 /// Cached texture with GPU resources.
@@ -183,6 +195,8 @@ pub struct WgpuBackend {
     scale_factor: f64,
     /// Current viewport for rendering (None = full canvas).
     current_viewport: Option<Viewport>,
+    /// Active view-projection matrix for camera rendering (None = 2D mode).
+    active_view_projection: Option<[f32; 16]>,
 }
 
 impl WgpuBackend {
@@ -318,6 +332,7 @@ impl WgpuBackend {
             },
             scale_factor: 1.0,
             current_viewport: None,
+            active_view_projection: None,
         })
     }
 
@@ -383,6 +398,7 @@ impl WgpuBackend {
             },
             scale_factor: 1.0,
             current_viewport: None,
+            active_view_projection: None,
         })
     }
 
@@ -528,6 +544,7 @@ impl WgpuBackend {
             },
             scale_factor,
             current_viewport: None,
+            active_view_projection: None,
         })
     }
 
@@ -962,6 +979,121 @@ impl WgpuBackend {
         self.current_viewport
     }
 
+    /// Render a scene with a camera for 3D/holographic rendering.
+    ///
+    /// This method sets up the view-projection matrix from the camera
+    /// and renders the scene using 3D transformations. The viewport
+    /// can be optionally set to render to a specific region.
+    ///
+    /// For 2D rendering (orthographic), use the standard `render` method
+    /// or pass `None` as the camera.
+    ///
+    /// # Arguments
+    ///
+    /// * `scene` - The scene to render.
+    /// * `camera` - Optional camera for 3D rendering. If `None`, uses 2D mode.
+    /// * `viewport` - Optional viewport for sub-region rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rendering fails.
+    #[allow(clippy::cast_precision_loss)] // Viewport dimensions fit in f32 for aspect ratio
+    pub fn render_with_camera(
+        &mut self,
+        scene: &Scene,
+        camera: Option<&Camera>,
+        viewport: Option<Viewport>,
+    ) -> RenderResult<()> {
+        // Set viewport if specified
+        let old_viewport = self.current_viewport;
+        if let Some(vp) = viewport {
+            self.set_viewport(vp.x, vp.y, vp.width, vp.height)?;
+        }
+
+        // Set camera view-projection matrix if camera is provided
+        self.active_view_projection = camera.map(|cam| {
+            // Calculate aspect ratio from viewport or canvas dimensions
+            let (width, height) = if let Some(vp) = self.current_viewport {
+                (vp.width, vp.height)
+            } else {
+                (self.width, self.height)
+            };
+            let aspect = width as f32 / height as f32;
+
+            // Compute view-projection matrix
+            let view = cam.view_matrix();
+            let proj = cam.projection_matrix(aspect);
+            let view_proj = proj.mul(&view);
+            view_proj.data
+        });
+
+        // Render using the standard render path (which now checks active_view_projection)
+        let result = self.render_internal(scene);
+
+        // Restore state
+        self.active_view_projection = None;
+        self.current_viewport = old_viewport;
+
+        result
+    }
+
+    /// Internal render method used by both `render` and `render_with_camera`.
+    fn render_internal(&mut self, scene: &Scene) -> RenderResult<()> {
+        let Some(surface) = &self.surface else {
+            tracing::trace!("No surface configured, skipping render");
+            return Ok(());
+        };
+
+        // Handle surface errors with recovery
+        let output = match surface.get_current_texture() {
+            Ok(output) => output,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                tracing::warn!("Surface lost/outdated, reconfiguring...");
+                self.reconfigure_surface()?;
+                self.surface
+                    .as_ref()
+                    .ok_or_else(|| RenderError::Surface("Surface lost during reconfigure".into()))?
+                    .get_current_texture()
+                    .map_err(|e| RenderError::Surface(format!("Failed after reconfigure: {e}")))?
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                tracing::warn!("Surface timeout, skipping frame");
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                return Err(RenderError::Surface("GPU out of memory".to_string()));
+            }
+            Err(wgpu::SurfaceError::Other) => {
+                return Err(RenderError::Surface("Unknown surface error".to_string()));
+            }
+        };
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+        self.render_scene_elements(&mut encoder, &view, scene);
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        tracing::trace!(
+            "Rendered {} elements to {}x{} surface (camera: {})",
+            scene.element_count(),
+            self.width,
+            self.height,
+            self.active_view_projection.is_some()
+        );
+
+        Ok(())
+    }
+
     /// Apply the current viewport and scissor rect to a render pass.
     ///
     /// This should be called after setting the pipeline but before drawing.
@@ -1113,7 +1245,11 @@ impl WgpuBackend {
         is_first: bool,
         color: [f32; 4],
     ) {
-        // Create uniforms
+        // Create uniforms (use_camera flag in canvas_size.z)
+        let (use_camera, view_proj) = match self.active_view_projection {
+            Some(vp) => (1.0, vp),
+            None => (0.0, IDENTITY_MATRIX),
+        };
         let uniforms = QuadUniforms {
             transform: [
                 element.transform.x,
@@ -1121,8 +1257,9 @@ impl WgpuBackend {
                 element.transform.width,
                 element.transform.height,
             ],
-            canvas_size: [self.width as f32, self.height as f32, 0.0, 0.0],
+            canvas_size: [self.width as f32, self.height as f32, use_camera, 0.0],
             color,
+            view_projection: view_proj,
         };
 
         // Update uniform buffer
@@ -1180,7 +1317,11 @@ impl WgpuBackend {
         is_first: bool,
         opacity: f32,
     ) {
-        // Create uniforms with opacity applied to alpha channel
+        // Create uniforms with opacity applied to alpha channel (use_camera flag in canvas_size.z)
+        let (use_camera, view_proj) = match self.active_view_projection {
+            Some(vp) => (1.0, vp),
+            None => (0.0, IDENTITY_MATRIX),
+        };
         let uniforms = QuadUniforms {
             transform: [
                 element.transform.x,
@@ -1188,8 +1329,9 @@ impl WgpuBackend {
                 element.transform.width,
                 element.transform.height,
             ],
-            canvas_size: [self.width as f32, self.height as f32, 0.0, 0.0],
+            canvas_size: [self.width as f32, self.height as f32, use_camera, 0.0],
             color: [1.0, 1.0, 1.0, opacity], // Apply opacity to alpha channel
+            view_projection: view_proj,
         };
 
         // Update uniform buffer
@@ -1710,60 +1852,8 @@ impl RenderBackend for WgpuBackend {
     }
 
     fn render(&mut self, scene: &Scene) -> RenderResult<()> {
-        let Some(surface) = &self.surface else {
-            tracing::trace!("No surface configured, skipping render");
-            return Ok(());
-        };
-
-        // Handle surface errors with recovery
-        let output = match surface.get_current_texture() {
-            Ok(output) => output,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                tracing::warn!("Surface lost/outdated, reconfiguring...");
-                // Need to reborrow surface after reconfigure
-                self.reconfigure_surface()?;
-                // Retry getting texture
-                self.surface
-                    .as_ref()
-                    .ok_or_else(|| RenderError::Surface("Surface lost during reconfigure".into()))?
-                    .get_current_texture()
-                    .map_err(|e| RenderError::Surface(format!("Failed after reconfigure: {e}")))?
-            }
-            Err(wgpu::SurfaceError::Timeout) => {
-                tracing::warn!("Surface timeout, skipping frame");
-                return Ok(());
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                return Err(RenderError::Surface("GPU out of memory".to_string()));
-            }
-            Err(wgpu::SurfaceError::Other) => {
-                return Err(RenderError::Surface("Unknown surface error".to_string()));
-            }
-        };
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        self.render_scene_elements(&mut encoder, &view, scene);
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        tracing::trace!(
-            "Rendered {} elements to {}x{} surface",
-            scene.element_count(),
-            self.width,
-            self.height
-        );
-
-        Ok(())
+        // Delegate to internal render method (2D mode: no camera)
+        self.render_internal(scene)
     }
 
     fn resize(&mut self, width: u32, height: u32) -> RenderResult<()> {

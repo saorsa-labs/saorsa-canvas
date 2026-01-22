@@ -7,26 +7,17 @@
     "name": "Initial Setup"
   },
   "phase": {
-    "number": 5,
-    "name": "A2UI and AG-UI Integration",
-    "plan": "PLAN-5",
+    "number": 6,
+    "name": "Holographic & Spatial",
+    "plan": "PLAN-6",
     "status": "in_progress"
   },
   "progress": {
-    "total_tasks": 6,
-    "completed_tasks": 0,
-    "current_task": "Task 1: Define A2UI types and parsing"
+    "total_tasks": 8,
+    "completed_tasks": 2,
+    "current_task": "Task 3: View camera unit tests"
   },
-  "status": "executing",
-  "last_updated": "2026-01-22T03:00:00Z",
-  "notes": "Phase 5 started. Implementing A2UI component tree support and AG-UI streaming.",
-  "last_review": {
-    "timestamp": "2026-01-22T02:30:00Z",
-    "phases": "Phase 4 Tasks 5-6",
-    "verdict": "passed",
-    "critical_count": 0,
-    "important_count": 2,
-    "suggestions_count": 4,
-    "fix_commits": []
-  }
+  "status": "awaiting_user",
+  "last_updated": "2026-01-22T14:00:00Z",
+  "notes": "Phase 6 in progress. Task 2 (camera projection integration) complete."
 }
