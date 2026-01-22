@@ -958,7 +958,6 @@ impl WgpuBackend {
         is_first: bool,
         color: [f32; 4],
     ) {
-
         // Create uniforms
         let uniforms = QuadUniforms {
             transform: [
@@ -1396,7 +1395,12 @@ impl WgpuBackend {
             // Check if we have a cached texture for this element
             if let Some(cached) = self.texture_cache.get(&key) {
                 self.render_textured_element_with_opacity(
-                    encoder, view, element, &cached.view, is_first, opacity,
+                    encoder,
+                    view,
+                    element,
+                    &cached.view,
+                    is_first,
+                    opacity,
                 );
             } else {
                 // Fallback to colored quad for non-textured elements

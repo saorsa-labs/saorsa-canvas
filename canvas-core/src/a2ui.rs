@@ -152,6 +152,54 @@ fn default_layout() -> String {
     "vertical".to_string()
 }
 
+/// Layout direction for containers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    /// Vertical layout (children stacked top-to-bottom).
+    #[default]
+    Column,
+    /// Horizontal layout (children arranged left-to-right).
+    Row,
+    /// Grid layout with specified number of columns.
+    Grid {
+        /// Number of columns in the grid.
+        columns: u32,
+    },
+    /// Stack layout (children overlaid on top of each other).
+    Stack,
+}
+
+impl Layout {
+    /// Parse a layout string into a Layout enum.
+    ///
+    /// Supported formats:
+    /// - "vertical" or "column" -> Column
+    /// - "horizontal" or "row" -> Row
+    /// - "grid:3" or "grid-3" -> Grid { columns: 3 }
+    /// - "stack" or "overlay" -> Stack
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        let lower = s.to_lowercase();
+        if lower == "horizontal" || lower == "row" {
+            Self::Row
+        } else if lower.starts_with("grid") {
+            // Parse "grid:3" or "grid-3" format
+            let columns = lower
+                .trim_start_matches("grid")
+                .trim_start_matches(':')
+                .trim_start_matches('-')
+                .parse()
+                .unwrap_or(2);
+            Self::Grid { columns }
+        } else if lower == "stack" || lower == "overlay" {
+            Self::Stack
+        } else {
+            // Default to column/vertical
+            Self::Column
+        }
+    }
+}
+
 /// Result of converting an A2UI tree to canvas elements.
 #[derive(Debug, Clone)]
 pub struct ConversionResult {
@@ -252,38 +300,116 @@ impl A2UIConverter {
     fn convert_container(
         &mut self,
         children: &[A2UINode],
-        layout: &str,
+        layout_str: &str,
         style: Option<&A2UIStyle>,
         start_x: f32,
         start_y: f32,
     ) -> Vec<Element> {
+        let layout = Layout::parse(layout_str);
+        let padding = style.and_then(|s| s.padding).unwrap_or(10.0);
+        let margin = style.and_then(|s| s.margin).unwrap_or(0.0);
+        let spacing = 10.0; // Default spacing between children
+
+        let base_x = start_x + padding + margin;
+        let base_y = start_y + padding + margin;
+
+        match layout {
+            Layout::Column => self.layout_column(children, base_x, base_y, spacing),
+            Layout::Row => self.layout_row(children, base_x, base_y, spacing),
+            Layout::Grid { columns } => {
+                self.layout_grid(children, base_x, base_y, spacing, columns)
+            }
+            Layout::Stack => self.layout_stack(children, base_x, base_y),
+        }
+    }
+
+    /// Layout children in a vertical column (top to bottom).
+    fn layout_column(
+        &mut self,
+        children: &[A2UINode],
+        start_x: f32,
+        start_y: f32,
+        spacing: f32,
+    ) -> Vec<Element> {
+        let mut elements = Vec::new();
+        let mut current_y = start_y;
+
+        for child in children {
+            let child_elements = self.convert_node(child, start_x, current_y);
+            let (_, child_height) = Self::calculate_bounds(&child_elements);
+            elements.extend(child_elements);
+            current_y += child_height + spacing;
+        }
+
+        elements
+    }
+
+    /// Layout children in a horizontal row (left to right).
+    fn layout_row(
+        &mut self,
+        children: &[A2UINode],
+        start_x: f32,
+        start_y: f32,
+        spacing: f32,
+    ) -> Vec<Element> {
+        let mut elements = Vec::new();
+        let mut current_x = start_x;
+
+        for child in children {
+            let child_elements = self.convert_node(child, current_x, start_y);
+            let (child_width, _) = Self::calculate_bounds(&child_elements);
+            elements.extend(child_elements);
+            current_x += child_width + spacing;
+        }
+
+        elements
+    }
+
+    /// Layout children in a grid with specified number of columns.
+    fn layout_grid(
+        &mut self,
+        children: &[A2UINode],
+        start_x: f32,
+        start_y: f32,
+        spacing: f32,
+        columns: u32,
+    ) -> Vec<Element> {
         let mut elements = Vec::new();
         let mut current_x = start_x;
         let mut current_y = start_y;
+        let mut row_height: f32 = 0.0;
+        let columns = columns.max(1) as usize; // Ensure at least 1 column
 
-        let padding = style.and_then(|s| s.padding).unwrap_or(10.0);
-        let spacing = 10.0; // Default spacing between children
+        for (i, child) in children.iter().enumerate() {
+            // Start new row if needed
+            if i > 0 && i % columns == 0 {
+                current_x = start_x;
+                current_y += row_height + spacing;
+                row_height = 0.0;
+            }
 
-        current_x += padding;
-        current_y += padding;
+            let child_elements = self.convert_node(child, current_x, current_y);
+            let (child_width, child_height) = Self::calculate_bounds(&child_elements);
+            row_height = row_height.max(child_height);
+            elements.extend(child_elements);
+            current_x += child_width + spacing;
+        }
+
+        elements
+    }
+
+    /// Layout children stacked on top of each other (same position, different z-index).
+    fn layout_stack(
+        &mut self,
+        children: &[A2UINode],
+        start_x: f32,
+        start_y: f32,
+    ) -> Vec<Element> {
+        let mut elements = Vec::new();
 
         for child in children {
-            let child_elements = self.convert_node(child, current_x, current_y);
-
-            // Calculate the bounding box of child elements for layout
-            let (child_width, child_height) = Self::calculate_bounds(&child_elements);
-
+            let child_elements = self.convert_node(child, start_x, start_y);
             elements.extend(child_elements);
-
-            match layout {
-                "horizontal" => {
-                    current_x += child_width + spacing;
-                }
-                _ => {
-                    // Default to vertical layout
-                    current_y += child_height + spacing;
-                }
-            }
         }
 
         elements
@@ -940,6 +1066,142 @@ mod tests {
         let transform = &result.elements[0].transform;
         assert!((transform.width - 300.0).abs() < f32::EPSILON);
         assert!((transform.height - 150.0).abs() < f32::EPSILON);
+    }
+
+    // ===========================================
+    // TDD: Layout Tests
+    // ===========================================
+
+    #[test]
+    fn test_layout_parse() {
+        assert_eq!(Layout::parse("vertical"), Layout::Column);
+        assert_eq!(Layout::parse("column"), Layout::Column);
+        assert_eq!(Layout::parse("horizontal"), Layout::Row);
+        assert_eq!(Layout::parse("row"), Layout::Row);
+        assert_eq!(Layout::parse("grid:3"), Layout::Grid { columns: 3 });
+        assert_eq!(Layout::parse("grid-2"), Layout::Grid { columns: 2 });
+        assert_eq!(Layout::parse("stack"), Layout::Stack);
+        assert_eq!(Layout::parse("overlay"), Layout::Stack);
+        assert_eq!(Layout::parse("unknown"), Layout::Column); // Default
+    }
+
+    #[test]
+    fn test_convert_grid_layout() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "grid:2",
+                "children": [
+                    { "component": "text", "content": "A" },
+                    { "component": "text", "content": "B" },
+                    { "component": "text", "content": "C" },
+                    { "component": "text", "content": "D" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+        let result = tree.to_elements();
+
+        assert_eq!(result.elements.len(), 4);
+
+        // In a 2-column grid:
+        // Row 1: A (x=10, y=10), B (x > 10, y=10)
+        // Row 2: C (x=10, y > 10), D (x > 10, y > 10)
+        let a = &result.elements[0].transform;
+        let b = &result.elements[1].transform;
+        let c = &result.elements[2].transform;
+        let d = &result.elements[3].transform;
+
+        // A and B same row (same y)
+        assert!((a.y - b.y).abs() < f32::EPSILON, "A and B should be on same row");
+        // B is to the right of A
+        assert!(b.x > a.x, "B should be right of A");
+        // C is below A (new row)
+        assert!(c.y > a.y, "C should be below A (new row)");
+        // C and D same row
+        assert!((c.y - d.y).abs() < f32::EPSILON, "C and D should be on same row");
+    }
+
+    #[test]
+    fn test_convert_stack_layout() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "stack",
+                "children": [
+                    { "component": "text", "content": "Background" },
+                    { "component": "text", "content": "Foreground" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+        let result = tree.to_elements();
+
+        assert_eq!(result.elements.len(), 2);
+
+        let bg = &result.elements[0].transform;
+        let fg = &result.elements[1].transform;
+
+        // Stack layout: same position, different z-index
+        assert!((bg.x - fg.x).abs() < f32::EPSILON, "X should be same");
+        assert!((bg.y - fg.y).abs() < f32::EPSILON, "Y should be same");
+        assert!(fg.z_index > bg.z_index, "Foreground should have higher z-index");
+    }
+
+    #[test]
+    fn test_layout_with_margin() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "vertical",
+                "style": {
+                    "margin": 20.0,
+                    "padding": 5.0
+                },
+                "children": [
+                    { "component": "text", "content": "Test" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+        let result = tree.to_elements();
+
+        // Position should account for margin + padding
+        let text = &result.elements[0].transform;
+        assert!(text.x >= 25.0, "X should include margin + padding");
+        assert!(text.y >= 25.0, "Y should include margin + padding");
+    }
+
+    #[test]
+    fn test_grid_with_varying_sizes() {
+        let json = r#"{
+            "root": {
+                "component": "container",
+                "layout": "grid:2",
+                "children": [
+                    { "component": "text", "content": "Small", "style": { "height": 20.0 } },
+                    { "component": "text", "content": "Tall", "style": { "height": 50.0 } },
+                    { "component": "text", "content": "Below" }
+                ]
+            }
+        }"#;
+
+        let tree = A2UITree::from_json(json).expect("should parse");
+        let result = tree.to_elements();
+
+        let small = &result.elements[0].transform;
+        let _tall = &result.elements[1].transform; // Tallest in row 1 (height 50)
+        let below = &result.elements[2].transform;
+
+        // Row height determined by tallest element (50)
+        // "Below" should be positioned after the tallest element in the previous row
+        assert!(
+            below.y > small.y + 50.0 - 1.0,
+            "Third element should be below the tallest in row 1"
+        );
     }
 
     #[test]

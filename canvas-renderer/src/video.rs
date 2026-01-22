@@ -431,7 +431,9 @@ mod tests {
         let frame = VideoFrameData::placeholder(800, 600).expect("Should create placeholder");
         manager.update_texture("test-stream", &frame);
 
-        let entry = manager.get_texture("test-stream").expect("Entry should exist");
+        let entry = manager
+            .get_texture("test-stream")
+            .expect("Entry should exist");
         assert_eq!(entry.width(), 800);
         assert_eq!(entry.height(), 600);
         assert_eq!(entry.last_updated(), 1);

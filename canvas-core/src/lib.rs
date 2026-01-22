@@ -40,7 +40,7 @@ pub mod store;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use a2ui::{A2UINode, A2UIStyle, A2UITree, ConversionResult};
+pub use a2ui::{A2UINode, A2UIStyle, A2UITree, ConversionResult, Layout};
 pub use element::{
     CropRect, Element, ElementId, ElementKind, ImageFormat, MediaConfig, MediaStats, QualityPreset,
     Resolution, Transform,
