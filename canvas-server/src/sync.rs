@@ -46,8 +46,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket};
 use canvas_core::{
-    ConflictStrategy, Element, ElementDocument, ElementId, OfflineQueue, Operation, Scene,
-    SceneDocument, SceneStore, StoreError,
+    ConflictResolution, ConflictStrategy, Element, ElementDocument, ElementId, OfflineQueue,
+    Operation, Scene, SceneDocument, SceneStore, StoreError,
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -1656,6 +1656,65 @@ pub struct FailedOperation {
     pub error: String,
 }
 
+/// Reason why a conflict was detected during sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// Tried to update or remove an element that does not exist.
+    ElementNotFound,
+    /// Tried to add an element with an ID that already exists.
+    ElementAlreadyExists,
+    /// Operation has a timestamp older than the current element state.
+    StaleTimestamp {
+        /// Timestamp from the local/current state.
+        local: u64,
+        /// Timestamp from the incoming remote operation.
+        remote: u64,
+    },
+    /// Multiple operations modified the same element concurrently.
+    ConcurrentModification,
+}
+
+impl std::fmt::Display for ConflictReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ElementNotFound => write!(f, "element not found"),
+            Self::ElementAlreadyExists => write!(f, "element already exists"),
+            Self::StaleTimestamp { local, remote } => {
+                write!(f, "stale timestamp (local={}, remote={})", local, remote)
+            }
+            Self::ConcurrentModification => write!(f, "concurrent modification"),
+        }
+    }
+}
+
+/// A detected conflict during sync processing.
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    /// The operation that caused the conflict.
+    pub operation: Operation,
+    /// The reason for the conflict.
+    pub reason: ConflictReason,
+    /// Whether this conflict has been resolved.
+    pub resolved: bool,
+}
+
+impl Conflict {
+    /// Create a new unresolved conflict.
+    #[must_use]
+    pub fn new(operation: Operation, reason: ConflictReason) -> Self {
+        Self {
+            operation,
+            reason,
+            resolved: false,
+        }
+    }
+
+    /// Mark this conflict as resolved.
+    pub fn mark_resolved(&mut self) {
+        self.resolved = true;
+    }
+}
+
 /// Result from batch operation processing.
 #[derive(Debug, Clone, Default)]
 pub struct SyncProcessorResult {
@@ -1665,6 +1724,8 @@ pub struct SyncProcessorResult {
     pub failed_count: usize,
     /// Details of failed operations (for debugging/retry decisions).
     pub failed_operations: Vec<FailedOperation>,
+    /// Conflicts detected during processing.
+    pub conflicts: Vec<Conflict>,
 }
 
 impl SyncProcessorResult {
@@ -1684,6 +1745,8 @@ pub struct SyncProcessor {
     store: Arc<SceneStore>,
     /// Conflict resolution strategy.
     conflict_strategy: ConflictStrategy,
+    /// Tracks the last known modification timestamp for each element.
+    element_timestamps: Arc<RwLock<HashMap<ElementId, u64>>>,
 }
 
 impl SyncProcessor {
@@ -1698,6 +1761,7 @@ impl SyncProcessor {
         Self {
             store,
             conflict_strategy: strategy,
+            element_timestamps: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1730,8 +1794,55 @@ impl SyncProcessor {
         let mut result = SyncProcessorResult::default();
 
         for operation in operations {
+            // Check for conflicts before applying
+            if let Some(mut conflict) = self.detect_conflict(session_id, &operation) {
+                let resolution = self.resolve_conflict(&conflict);
+                conflict.mark_resolved();
+                result.conflicts.push(conflict.clone());
+
+                match resolution {
+                    ConflictResolution::KeepLocal => {
+                        // Skip this operation, count as conflict
+                        result.failed_count += 1;
+                        result.failed_operations.push(FailedOperation {
+                            operation: operation.clone(),
+                            error: format!("Conflict resolved: {}", conflict.reason),
+                        });
+                        continue;
+                    }
+                    ConflictResolution::KeepRemote => {
+                        // Proceed to apply the operation
+                    }
+                    ConflictResolution::Merge => {
+                        // Merge not yet implemented, treat as KeepLocal
+                        result.failed_count += 1;
+                        result.failed_operations.push(FailedOperation {
+                            operation: operation.clone(),
+                            error: "Merge conflict resolution not implemented".to_string(),
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // Apply the operation
             match self.apply_operation(session_id, &operation) {
-                Ok(()) => result.processed_count += 1,
+                Ok(()) => {
+                    result.processed_count += 1;
+                    // Update timestamp tracking
+                    match &operation {
+                        Operation::AddElement { element, timestamp } => {
+                            self.update_timestamp(element.id, *timestamp);
+                        }
+                        Operation::UpdateElement { id, timestamp, .. } => {
+                            self.update_timestamp(*id, *timestamp);
+                        }
+                        Operation::RemoveElement { id, .. } => {
+                            self.remove_timestamp(id);
+                        }
+                        Operation::Interaction { .. } => {}
+                    }
+                }
                 Err(e) => {
                     result.failed_count += 1;
                     result.failed_operations.push(FailedOperation {
@@ -1741,7 +1852,6 @@ impl SyncProcessor {
                 }
             }
         }
-
         result
     }
 
@@ -1803,6 +1913,212 @@ impl SyncProcessor {
             }
         }
         Ok(())
+    }
+
+    /// Detect if an operation would cause a conflict.
+    ///
+    /// Checks the current state to determine if the operation can be applied
+    /// without conflict. Returns `Some(Conflict)` if a conflict is detected,
+    /// `None` otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session to check against.
+    /// * `op` - The operation to check.
+    fn detect_conflict(&self, session_id: &str, op: &Operation) -> Option<Conflict> {
+        let scene = self.store.get(session_id);
+
+        match op {
+            Operation::AddElement { element, timestamp } => {
+                // Check if element already exists
+                if let Some(ref s) = scene {
+                    if s.get_element(element.id).is_some() {
+                        return Some(Conflict::new(
+                            op.clone(),
+                            ConflictReason::ElementAlreadyExists,
+                        ));
+                    }
+                }
+                // Check for stale timestamp
+                if let Ok(timestamps) = self.element_timestamps.read() {
+                    if let Some(&local_ts) = timestamps.get(&element.id) {
+                        if *timestamp < local_ts {
+                            return Some(Conflict::new(
+                                op.clone(),
+                                ConflictReason::StaleTimestamp {
+                                    local: local_ts,
+                                    remote: *timestamp,
+                                },
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            Operation::UpdateElement { id, timestamp, .. } => {
+                // Check if element exists
+                match &scene {
+                    Some(s) if s.get_element(*id).is_none() => {
+                        return Some(Conflict::new(op.clone(), ConflictReason::ElementNotFound));
+                    }
+                    None => {
+                        return Some(Conflict::new(op.clone(), ConflictReason::ElementNotFound));
+                    }
+                    _ => {}
+                }
+                // Check for stale timestamp
+                if let Ok(timestamps) = self.element_timestamps.read() {
+                    if let Some(&local_ts) = timestamps.get(id) {
+                        if *timestamp < local_ts {
+                            return Some(Conflict::new(
+                                op.clone(),
+                                ConflictReason::StaleTimestamp {
+                                    local: local_ts,
+                                    remote: *timestamp,
+                                },
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            Operation::RemoveElement { id, timestamp } => {
+                // Check if element exists
+                match &scene {
+                    Some(s) if s.get_element(*id).is_none() => {
+                        return Some(Conflict::new(op.clone(), ConflictReason::ElementNotFound));
+                    }
+                    None => {
+                        return Some(Conflict::new(op.clone(), ConflictReason::ElementNotFound));
+                    }
+                    _ => {}
+                }
+                // Check for stale timestamp
+                if let Ok(timestamps) = self.element_timestamps.read() {
+                    if let Some(&local_ts) = timestamps.get(id) {
+                        if *timestamp < local_ts {
+                            return Some(Conflict::new(
+                                op.clone(),
+                                ConflictReason::StaleTimestamp {
+                                    local: local_ts,
+                                    remote: *timestamp,
+                                },
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            Operation::Interaction { .. } => {
+                // Interactions do not cause conflicts
+                None
+            }
+        }
+    }
+
+    /// Resolve a conflict using the configured strategy.
+    ///
+    /// Returns the resolution decision based on the conflict reason and
+    /// the processor's conflict strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `conflict` - The conflict to resolve.
+    #[must_use]
+    pub fn resolve_conflict(&self, conflict: &Conflict) -> ConflictResolution {
+        match &conflict.reason {
+            ConflictReason::ElementNotFound => {
+                // Element not found - cannot apply operation regardless of strategy
+                tracing::debug!(
+                    reason = %conflict.reason,
+                    "Conflict: element not found, skipping operation"
+                );
+                ConflictResolution::KeepLocal
+            }
+            ConflictReason::ElementAlreadyExists => {
+                // Element already exists - use strategy to decide
+                match self.conflict_strategy {
+                    ConflictStrategy::LastWriteWins | ConflictStrategy::RemoteWins => {
+                        tracing::debug!(
+                            strategy = ?self.conflict_strategy,
+                            reason = %conflict.reason,
+                            "Conflict: element exists, overwriting with remote"
+                        );
+                        ConflictResolution::KeepRemote
+                    }
+                    ConflictStrategy::LocalWins => {
+                        tracing::debug!(
+                            strategy = ?self.conflict_strategy,
+                            reason = %conflict.reason,
+                            "Conflict: element exists, keeping local"
+                        );
+                        ConflictResolution::KeepLocal
+                    }
+                }
+            }
+            ConflictReason::StaleTimestamp { local, remote } => {
+                match self.conflict_strategy {
+                    ConflictStrategy::LastWriteWins => {
+                        // Already detected as stale, keep local
+                        tracing::debug!(
+                            local_ts = local,
+                            remote_ts = remote,
+                            "Conflict: stale timestamp, keeping local (LastWriteWins)"
+                        );
+                        ConflictResolution::KeepLocal
+                    }
+                    ConflictStrategy::LocalWins => {
+                        tracing::debug!(
+                            local_ts = local,
+                            remote_ts = remote,
+                            "Conflict: keeping local (LocalWins strategy)"
+                        );
+                        ConflictResolution::KeepLocal
+                    }
+                    ConflictStrategy::RemoteWins => {
+                        tracing::debug!(
+                            local_ts = local,
+                            remote_ts = remote,
+                            "Conflict: applying remote despite stale timestamp (RemoteWins)"
+                        );
+                        ConflictResolution::KeepRemote
+                    }
+                }
+            }
+            ConflictReason::ConcurrentModification => {
+                // Use strategy to decide
+                match self.conflict_strategy {
+                    ConflictStrategy::LastWriteWins | ConflictStrategy::RemoteWins => {
+                        tracing::debug!(
+                            strategy = ?self.conflict_strategy,
+                            "Conflict: concurrent modification, applying remote"
+                        );
+                        ConflictResolution::KeepRemote
+                    }
+                    ConflictStrategy::LocalWins => {
+                        tracing::debug!(
+                            strategy = ?self.conflict_strategy,
+                            "Conflict: concurrent modification, keeping local"
+                        );
+                        ConflictResolution::KeepLocal
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update the timestamp for an element after a successful operation.
+    fn update_timestamp(&self, element_id: ElementId, timestamp: u64) {
+        if let Ok(mut timestamps) = self.element_timestamps.write() {
+            timestamps.insert(element_id, timestamp);
+        }
+    }
+
+    /// Remove the timestamp for an element after removal.
+    fn remove_timestamp(&self, element_id: &ElementId) {
+        if let Ok(mut timestamps) = self.element_timestamps.write() {
+            timestamps.remove(element_id);
+        }
     }
 }
 
@@ -4256,5 +4572,314 @@ mod tests {
         assert_eq!(result.failed_count, 1);
         assert!(!result.success());
         assert_eq!(result.failed_operations.len(), 1);
+    }
+
+    // ========================
+    // Conflict Detection Tests
+    // ========================
+
+    #[test]
+    fn test_conflict_reason_display() {
+        let not_found = ConflictReason::ElementNotFound;
+        assert_eq!(not_found.to_string(), "element not found");
+
+        let exists = ConflictReason::ElementAlreadyExists;
+        assert_eq!(exists.to_string(), "element already exists");
+
+        let stale = ConflictReason::StaleTimestamp {
+            local: 200,
+            remote: 100,
+        };
+        assert_eq!(stale.to_string(), "stale timestamp (local=200, remote=100)");
+
+        let concurrent = ConflictReason::ConcurrentModification;
+        assert_eq!(concurrent.to_string(), "concurrent modification");
+    }
+
+    #[test]
+    fn test_conflict_new_and_mark_resolved() {
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        let mut conflict = Conflict::new(op.clone(), ConflictReason::ElementNotFound);
+
+        assert!(!conflict.resolved);
+        assert!(matches!(conflict.reason, ConflictReason::ElementNotFound));
+
+        conflict.mark_resolved();
+        assert!(conflict.resolved);
+    }
+
+    #[test]
+    fn test_detect_conflict_element_not_found_on_update() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let fake_id = canvas_core::ElementId::new();
+        let op = Operation::UpdateElement {
+            id: fake_id,
+            changes: serde_json::json!({"transform": {"x": 100.0}}),
+            timestamp: 100,
+        };
+
+        let conflict = processor.detect_conflict("default", &op);
+        assert!(conflict.is_some());
+        let c = conflict.expect("should have conflict");
+        assert!(matches!(c.reason, ConflictReason::ElementNotFound));
+    }
+
+    #[test]
+    fn test_detect_conflict_element_not_found_on_remove() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let fake_id = canvas_core::ElementId::new();
+        let op = Operation::RemoveElement {
+            id: fake_id,
+            timestamp: 100,
+        };
+
+        let conflict = processor.detect_conflict("default", &op);
+        assert!(conflict.is_some());
+        let c = conflict.expect("should have conflict");
+        assert!(matches!(c.reason, ConflictReason::ElementNotFound));
+    }
+
+    #[test]
+    fn test_detect_conflict_element_already_exists() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let _element_id = element.id;
+        let _ = store.add_element("default", element.clone());
+
+        let op = Operation::AddElement {
+            element: element.clone(),
+            timestamp: 100,
+        };
+
+        let conflict = processor.detect_conflict("default", &op);
+        assert!(conflict.is_some());
+        let c = conflict.expect("should have conflict");
+        assert!(matches!(c.reason, ConflictReason::ElementAlreadyExists));
+    }
+
+    #[test]
+    fn test_detect_conflict_stale_timestamp() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let element_id = element.id;
+
+        processor.update_timestamp(element_id, 200);
+
+        let op = Operation::UpdateElement {
+            id: element_id,
+            changes: serde_json::json!({"transform": {"x": 100.0}}),
+            timestamp: 100,
+        };
+
+        let _conflict = processor.detect_conflict("default", &op);
+        let _ = store.add_element("default", element);
+
+        let conflict2 = processor.detect_conflict("default", &op);
+        assert!(conflict2.is_some());
+        if let Some(c) = conflict2 {
+            match c.reason {
+                ConflictReason::StaleTimestamp { local, remote } => {
+                    assert_eq!(local, 200);
+                    assert_eq!(remote, 100);
+                }
+                _ => panic!("Expected StaleTimestamp conflict"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_no_conflict_for_interaction() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let op = Operation::Interaction {
+            event: canvas_core::InputEvent::Touch(canvas_core::TouchEvent::new(
+                canvas_core::TouchPhase::Start,
+                vec![],
+                100,
+            )),
+            timestamp: 100,
+        };
+
+        let conflict = processor.detect_conflict("default", &op);
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_resolve_conflict_element_not_found_keeps_local() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::RemoteWins);
+
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(op, ConflictReason::ElementNotFound);
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_resolve_conflict_already_exists_last_write_wins() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let op = Operation::AddElement {
+            element,
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(op, ConflictReason::ElementAlreadyExists);
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+    }
+
+    #[test]
+    fn test_resolve_conflict_already_exists_local_wins() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::LocalWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let op = Operation::AddElement {
+            element,
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(op, ConflictReason::ElementAlreadyExists);
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_resolve_conflict_stale_timestamp_last_write_wins() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
+
+        let op = Operation::UpdateElement {
+            id: canvas_core::ElementId::new(),
+            changes: serde_json::json!({}),
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(
+            op,
+            ConflictReason::StaleTimestamp {
+                local: 200,
+                remote: 100,
+            },
+        );
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_resolve_conflict_stale_timestamp_remote_wins() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::RemoteWins);
+
+        let op = Operation::UpdateElement {
+            id: canvas_core::ElementId::new(),
+            changes: serde_json::json!({}),
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(
+            op,
+            ConflictReason::StaleTimestamp {
+                local: 200,
+                remote: 100,
+            },
+        );
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepRemote);
+    }
+
+    #[test]
+    fn test_resolve_conflict_concurrent_modification() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::LocalWins);
+
+        let op = Operation::UpdateElement {
+            id: canvas_core::ElementId::new(),
+            changes: serde_json::json!({}),
+            timestamp: 100,
+        };
+        let conflict = Conflict::new(op, ConflictReason::ConcurrentModification);
+
+        let resolution = processor.resolve_conflict(&conflict);
+        assert_eq!(resolution, ConflictResolution::KeepLocal);
+    }
+
+    #[test]
+    fn test_process_batch_tracks_conflicts() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
+
+        let element = Element::new(ElementKind::Text {
+            content: "Test".to_string(),
+            font_size: 16.0,
+            color: "#000000".to_string(),
+        });
+        let _element_id = element.id;
+        let _ = store.add_element("default", element.clone());
+
+        let operations = vec![Operation::AddElement {
+            element: element.clone(),
+            timestamp: 100,
+        }];
+
+        let result = processor.process_batch("default", operations);
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert!(result.conflicts[0].resolved);
+        assert!(matches!(
+            result.conflicts[0].reason,
+            ConflictReason::ElementAlreadyExists
+        ));
+    }
+
+    #[test]
+    fn test_sync_processor_result_has_conflicts_field() {
+        let result = SyncProcessorResult::default();
+        assert!(result.conflicts.is_empty());
+
+        let mut result2 = SyncProcessorResult::default();
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        result2
+            .conflicts
+            .push(Conflict::new(op, ConflictReason::ElementNotFound));
+        assert_eq!(result2.conflicts.len(), 1);
     }
 }
