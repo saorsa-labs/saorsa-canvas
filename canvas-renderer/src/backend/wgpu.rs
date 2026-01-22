@@ -1160,7 +1160,7 @@ impl WgpuBackend {
         }
 
         // Check if we have a video texture for this stream
-        let video_key = format!("video:{stream_id}");
+        let video_key = Self::video_texture_key(stream_id);
         if self.video_textures.contains_key(&video_key) {
             tracing::debug!(
                 "Video stream {stream_id} has cached texture, using placeholder for now"
@@ -1222,7 +1222,7 @@ impl WgpuBackend {
             )));
         }
 
-        let video_key = format!("video:{stream_id}");
+        let video_key = Self::video_texture_key(stream_id);
         let label = format!("Video Stream: {stream_id}");
 
         let cached = self.texture_from_rgba(rgba_data, width, height, &label)?;
@@ -1241,7 +1241,7 @@ impl WgpuBackend {
     ///
     /// Call this when a video stream ends.
     pub fn remove_video_stream(&mut self, stream_id: &str) {
-        let video_key = format!("video:{stream_id}");
+        let video_key = Self::video_texture_key(stream_id);
         self.video_textures.remove(&video_key);
         tracing::debug!("Removed video stream texture: {stream_id}");
     }
@@ -1250,6 +1250,12 @@ impl WgpuBackend {
     pub fn clear_video_textures(&mut self) {
         self.video_textures.clear();
         tracing::debug!("Cleared all video textures");
+    }
+
+    /// Generate a consistent cache key for a video stream.
+    #[inline]
+    fn video_texture_key(stream_id: &str) -> String {
+        format!("video:{stream_id}")
     }
 
     /// Get the display color for an element based on its kind.
@@ -1326,7 +1332,10 @@ impl WgpuBackend {
             return;
         }
 
-        // First pass: Prepare textures for Chart and Image elements
+        // First pass: Prepare textures for Chart, Image, and Video elements.
+        // Note: Texture preparation errors are logged but not propagated to avoid
+        // a single failed element from blocking the entire render loop. The element
+        // will simply not appear or show a placeholder.
         for element in &elements {
             match &element.kind {
                 ElementKind::Chart { chart_type, data } => {

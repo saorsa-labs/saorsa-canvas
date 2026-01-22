@@ -49,6 +49,13 @@ pub type VideoTextureResult<T> = Result<T, VideoTextureError>;
 /// This struct holds a single frame of video data that can be uploaded
 /// to a GPU texture. The data is expected to be in RGBA format with
 /// 4 bytes per pixel.
+///
+/// # Note on Public Fields
+///
+/// Fields are public for zero-copy access to pixel data. Use the constructor
+/// [`VideoFrameData::new`] or [`VideoFrameData::placeholder`] to create
+/// validated instances. Direct modification of fields after construction
+/// may violate the `width*height*4 == data.len()` invariant.
 #[derive(Debug, Clone)]
 pub struct VideoFrameData {
     /// Width of the frame in pixels.
@@ -124,9 +131,30 @@ impl VideoFrameData {
     pub fn is_valid(&self) -> bool {
         self.width > 0 && self.height > 0 && !self.data.is_empty()
     }
+
+    /// Get the frame width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Get the frame height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Get a reference to the RGBA pixel data.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
-/// Cached video texture entry.
+/// Cached video texture entry metadata.
+///
+/// This struct tracks metadata about a video texture (dimensions and update time).
+/// Fields are public for simple read access in the render loop.
 #[derive(Debug)]
 pub struct VideoTextureEntry {
     /// Width of the cached texture.
@@ -137,6 +165,26 @@ pub struct VideoTextureEntry {
     pub last_updated: u64,
 }
 
+impl VideoTextureEntry {
+    /// Get the texture width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Get the texture height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Get the last update frame number.
+    #[must_use]
+    pub fn last_updated(&self) -> u64 {
+        self.last_updated
+    }
+}
+
 /// Manages video textures for multiple streams.
 ///
 /// This manager tracks active video streams and their associated GPU textures.
@@ -145,14 +193,14 @@ pub struct VideoTextureEntry {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use canvas_renderer::video::{VideoTextureManager, VideoFrameData};
 ///
 /// let mut manager = VideoTextureManager::new();
 ///
 /// // Update a video stream with new frame data
-/// let frame = VideoFrameData::placeholder(640, 480);
-/// manager.update_texture("stream-1", frame);
+/// let frame = VideoFrameData::placeholder(640, 480).expect("valid dimensions");
+/// manager.update_texture("stream-1", &frame);
 ///
 /// // Check if texture exists
 /// if manager.has_texture("stream-1") {
