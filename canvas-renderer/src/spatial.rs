@@ -746,6 +746,175 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_camera_for_view_edge_angles() {
+        let config = HolographicConfig::looking_glass_portrait();
+        let base = Camera::new();
+
+        // With base camera at (0, 0, 5) looking at origin,
+        // edge views should be at half the view cone angle
+        let left_cam = config.camera_for_view(&base, 0);
+        let right_cam = config.camera_for_view(&base, 44);
+
+        // Calculate actual angles from camera positions
+        let left_angle = left_cam.position.x.atan2(left_cam.position.z);
+        let right_angle = right_cam.position.x.atan2(right_cam.position.z);
+
+        // Total angle span should match view_cone
+        let total_span = right_angle - left_angle;
+        let expected_span = config.view_cone;
+        assert!(
+            (total_span - expected_span).abs() < 0.01,
+            "View cone span {total_span:.4} should match config {expected_span:.4}"
+        );
+    }
+
+    #[test]
+    fn test_camera_for_view_all_point_to_target() {
+        let config = HolographicConfig::looking_glass_portrait();
+        let base = Camera::new();
+
+        // Every generated camera should point at the same target
+        for i in 0..config.num_views {
+            let view_cam = config.camera_for_view(&base, i);
+            assert!(
+                approx_eq(view_cam.target.x, base.target.x),
+                "View {} target.x {} should equal base {}",
+                i,
+                view_cam.target.x,
+                base.target.x
+            );
+            assert!(
+                approx_eq(view_cam.target.y, base.target.y),
+                "View {} target.y {} should equal base {}",
+                i,
+                view_cam.target.y,
+                base.target.y
+            );
+            assert!(
+                approx_eq(view_cam.target.z, base.target.z),
+                "View {} target.z {} should equal base {}",
+                i,
+                view_cam.target.z,
+                base.target.z
+            );
+        }
+    }
+
+    #[test]
+    fn test_camera_for_view_preserves_camera_params() {
+        let config = HolographicConfig::looking_glass_portrait();
+        let base = Camera {
+            position: Vec3::new(0.0, 0.0, 10.0),
+            target: Vec3::new(0.0, 0.0, 0.0),
+            up: Vec3::up(),
+            fov: 0.8,  // Custom FOV
+            near: 0.5, // Custom near
+            far: 50.0, // Custom far
+        };
+
+        // All generated cameras should preserve FOV, near, far, and up
+        for i in 0..config.num_views {
+            let view_cam = config.camera_for_view(&base, i);
+            assert!(approx_eq(view_cam.fov, base.fov), "View {} FOV mismatch", i);
+            assert!(
+                approx_eq(view_cam.near, base.near),
+                "View {} near mismatch",
+                i
+            );
+            assert!(approx_eq(view_cam.far, base.far), "View {} far mismatch", i);
+            assert!(
+                approx_eq(view_cam.up.x, base.up.x)
+                    && approx_eq(view_cam.up.y, base.up.y)
+                    && approx_eq(view_cam.up.z, base.up.z),
+                "View {} up vector mismatch",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_camera_for_view_4k_config() {
+        let config = HolographicConfig::looking_glass_4k();
+        let base = Camera::new();
+
+        // Same tests as portrait - verify 4K config also works
+        assert_eq!(config.num_views, 45);
+
+        // Center view should be near base
+        let center_cam = config.camera_for_view(&base, 22);
+        let distance_from_base = center_cam.position.sub(&base.position).length();
+        assert!(
+            distance_from_base < 0.5,
+            "4K center view should be near base"
+        );
+
+        // Symmetry check
+        let left_cam = config.camera_for_view(&base, 0);
+        let right_cam = config.camera_for_view(&base, 44);
+        assert!(
+            approx_eq(left_cam.position.x, -right_cam.position.x),
+            "4K edge views should be symmetric"
+        );
+
+        // View cone should match
+        let left_angle = left_cam.position.x.atan2(left_cam.position.z);
+        let right_angle = right_cam.position.x.atan2(right_cam.position.z);
+        let total_span = right_angle - left_angle;
+        assert!(
+            (total_span - config.view_cone).abs() < 0.01,
+            "4K view cone should match config"
+        );
+    }
+
+    #[test]
+    fn test_camera_for_view_custom_target() {
+        let config = HolographicConfig::looking_glass_portrait();
+        let base = Camera {
+            position: Vec3::new(5.0, 2.0, 8.0),
+            target: Vec3::new(5.0, 2.0, 0.0), // Offset target
+            up: Vec3::up(),
+            fov: std::f32::consts::FRAC_PI_4,
+            near: 0.1,
+            far: 100.0,
+        };
+
+        let base_distance = base.position.sub(&base.target).length();
+
+        // All views should maintain distance to custom target
+        for i in 0..config.num_views {
+            let view_cam = config.camera_for_view(&base, i);
+            let view_distance = view_cam.position.sub(&view_cam.target).length();
+            assert!(
+                approx_eq(view_distance, base_distance),
+                "View {} distance {} should match base {}",
+                i,
+                view_distance,
+                base_distance
+            );
+            // Target should be unchanged
+            assert!(approx_eq(view_cam.target.x, base.target.x));
+            assert!(approx_eq(view_cam.target.y, base.target.y));
+            assert!(approx_eq(view_cam.target.z, base.target.z));
+        }
+    }
+
+    #[test]
+    fn test_camera_for_view_zero_views() {
+        // Edge case: zero views should return base camera
+        let config = HolographicConfig {
+            num_views: 0,
+            ..Default::default()
+        };
+        let base = Camera::new();
+        let view_cam = config.camera_for_view(&base, 0);
+
+        // With 0 views, should return base (num_views <= 1 branch)
+        assert!(approx_eq(view_cam.position.x, base.position.x));
+        assert!(approx_eq(view_cam.position.y, base.position.y));
+        assert!(approx_eq(view_cam.position.z, base.position.z));
+    }
+
     // ===========================================
     // TDD: QuiltRenderInfo Tests
     // ===========================================
