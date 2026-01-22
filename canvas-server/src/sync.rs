@@ -1647,6 +1647,15 @@ impl From<StoreError> for SyncError {
     }
 }
 
+/// A failed operation with its error message.
+#[derive(Debug, Clone)]
+pub struct FailedOperation {
+    /// The operation that failed.
+    pub operation: Operation,
+    /// Human-readable error description.
+    pub error: String,
+}
+
 /// Result from batch operation processing.
 #[derive(Debug, Clone, Default)]
 pub struct SyncProcessorResult {
@@ -1654,8 +1663,16 @@ pub struct SyncProcessorResult {
     pub processed_count: usize,
     /// Number of operations that failed.
     pub failed_count: usize,
+    /// Details of failed operations (for debugging/retry decisions).
+    pub failed_operations: Vec<FailedOperation>,
+}
+
+impl SyncProcessorResult {
     /// Whether all operations were processed successfully.
-    pub success: bool,
+    #[must_use]
+    pub const fn success(&self) -> bool {
+        self.failed_count == 0
+    }
 }
 
 /// Processes batched scene operations with conflict resolution.
@@ -1698,32 +1715,34 @@ impl SyncProcessor {
     /// Process a batch of operations for a session.
     ///
     /// Iterates through the operations and applies them to the scene store.
-    /// Returns a result indicating how many operations succeeded or failed.
+    /// Returns a result indicating how many operations succeeded or failed,
+    /// including details of any failures for debugging or retry decisions.
     ///
     /// # Arguments
     ///
     /// * `session_id` - The session to apply operations to.
     /// * `operations` - The operations to process.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `SyncError` if the session is not found.
-    pub async fn process_batch(
+    pub fn process_batch(
         &self,
         session_id: &str,
         operations: Vec<Operation>,
-    ) -> Result<SyncProcessorResult, SyncError> {
+    ) -> SyncProcessorResult {
         let mut result = SyncProcessorResult::default();
 
         for operation in operations {
             match self.apply_operation(session_id, &operation) {
                 Ok(()) => result.processed_count += 1,
-                Err(_e) => result.failed_count += 1,
+                Err(e) => {
+                    result.failed_count += 1;
+                    result.failed_operations.push(FailedOperation {
+                        operation: operation.clone(),
+                        error: e.to_string(),
+                    });
+                }
             }
         }
 
-        result.success = result.failed_count == 0;
-        Ok(result)
+        result
     }
 
     /// Apply a single operation to the store.
@@ -1750,7 +1769,7 @@ impl SyncProcessor {
             }
             Operation::Interaction { .. } => {
                 // Interactions are events, not stored state changes
-                // They can be processed/broadcast but dont modify the store directly
+                // They can be processed/broadcast but don't modify the store directly
             }
         }
         Ok(())
@@ -3735,21 +3754,18 @@ mod tests {
         assert_eq!(processor.conflict_strategy(), ConflictStrategy::LocalWins);
     }
 
-    #[tokio::test]
-    async fn test_sync_processor_process_empty_batch() {
+    #[test]
+    fn test_sync_processor_process_empty_batch() {
         let store = Arc::new(SceneStore::new());
         let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
-        let result = processor
-            .process_batch("default", vec![])
-            .await
-            .expect("should succeed");
+        let result = processor.process_batch("default", vec![]);
         assert_eq!(result.processed_count, 0);
         assert_eq!(result.failed_count, 0);
-        assert!(result.success);
+        assert!(result.success());
     }
 
-    #[tokio::test]
-    async fn test_sync_processor_process_add_element() {
+    #[test]
+    fn test_sync_processor_process_add_element() {
         let store = Arc::new(SceneStore::new());
         let processor = SyncProcessor::new(store.clone(), ConflictStrategy::LastWriteWins);
 
@@ -3763,16 +3779,37 @@ mod tests {
             timestamp: Operation::now(),
         }];
 
-        let result = processor
-            .process_batch("default", operations)
-            .await
-            .expect("should succeed");
+        let result = processor.process_batch("default", operations);
         assert_eq!(result.processed_count, 1);
         assert_eq!(result.failed_count, 0);
-        assert!(result.success);
+        assert!(result.success());
 
         // Verify element was added
         let scene = store.get("default").expect("session should exist");
         assert_eq!(scene.element_count(), 1);
+    }
+
+    #[test]
+    fn test_sync_processor_tracks_failed_operations() {
+        let store = Arc::new(SceneStore::new());
+        let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
+
+        // Try to remove an element that doesn't exist (should fail)
+        let fake_id = ElementId::new();
+        let operations = vec![Operation::RemoveElement {
+            id: fake_id,
+            timestamp: Operation::now(),
+        }];
+
+        let result = processor.process_batch("default", operations);
+        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.failed_count, 1);
+        assert!(!result.success());
+
+        // Verify the failed operation was tracked with error details
+        assert_eq!(result.failed_operations.len(), 1);
+        assert!(result.failed_operations[0]
+            .error
+            .contains("not found"));
     }
 }
