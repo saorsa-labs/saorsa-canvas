@@ -1648,16 +1648,48 @@ impl From<StoreError> for SyncError {
 }
 
 /// A failed operation with its error message.
-#[derive(Debug, Clone)]
+///
+/// This struct captures detailed information about why an operation failed,
+/// including whether the failure is retryable (transient) or permanent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedOperation {
     /// The operation that failed.
     pub operation: Operation,
     /// Human-readable error description.
     pub error: String,
+    /// Whether this failure is retryable.
+    ///
+    /// - `true`: Transient failure (network issues, temporary conflicts) - client should retry
+    /// - `false`: Permanent failure (invalid data, authorization) - no point retrying
+    pub retryable: bool,
+}
+
+impl FailedOperation {
+    /// Create a new failed operation.
+    #[must_use]
+    pub const fn new(operation: Operation, error: String, retryable: bool) -> Self {
+        Self {
+            operation,
+            error,
+            retryable,
+        }
+    }
+
+    /// Create a retryable failed operation (transient failure).
+    #[must_use]
+    pub const fn retryable(operation: Operation, error: String) -> Self {
+        Self::new(operation, error, true)
+    }
+
+    /// Create a non-retryable failed operation (permanent failure).
+    #[must_use]
+    pub const fn permanent(operation: Operation, error: String) -> Self {
+        Self::new(operation, error, false)
+    }
 }
 
 /// Reason why a conflict was detected during sync.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConflictReason {
     /// Tried to update or remove an element that does not exist.
     ElementNotFound,
@@ -1688,7 +1720,7 @@ impl std::fmt::Display for ConflictReason {
 }
 
 /// A detected conflict during sync processing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     /// The operation that caused the conflict.
     pub operation: Operation,
@@ -1716,23 +1748,100 @@ impl Conflict {
 }
 
 /// Result from batch operation processing.
-#[derive(Debug, Clone, Default)]
+///
+/// Contains detailed metrics about the sync operation including timing,
+/// success/failure counts, and categorization of failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncProcessorResult {
-    /// Number of operations successfully processed.
-    pub processed_count: usize,
+    /// Whether the overall sync operation succeeded (no failures).
+    pub success: bool,
+    /// Number of operations successfully synced.
+    pub synced_count: usize,
+    /// Number of conflicts detected during processing.
+    pub conflict_count: usize,
     /// Number of operations that failed.
     pub failed_count: usize,
-    /// Details of failed operations (for debugging/retry decisions).
-    pub failed_operations: Vec<FailedOperation>,
     /// Conflicts detected during processing.
     pub conflicts: Vec<Conflict>,
+    /// Details of failed operations (for debugging/retry decisions).
+    pub failed_operations: Vec<FailedOperation>,
+    /// Duration of the sync operation in milliseconds.
+    pub duration_ms: u64,
+    /// Timestamp when the sync completed (ms since Unix epoch).
+    pub timestamp: u64,
+}
+
+impl Default for SyncProcessorResult {
+    fn default() -> Self {
+        Self {
+            success: true,
+            synced_count: 0,
+            conflict_count: 0,
+            failed_count: 0,
+            conflicts: Vec::new(),
+            failed_operations: Vec::new(),
+            duration_ms: 0,
+            timestamp: 0,
+        }
+    }
 }
 
 impl SyncProcessorResult {
-    /// Whether all operations were processed successfully.
+    /// Create a new result with the current timestamp.
     #[must_use]
-    pub const fn success(&self) -> bool {
-        self.failed_count == 0
+    pub fn new() -> Self {
+        Self {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            ..Default::default()
+        }
+    }
+
+    /// Record a successful operation.
+    pub fn record_success(&mut self) {
+        self.synced_count += 1;
+    }
+
+    /// Record a failed operation.
+    pub fn record_failure(&mut self, failed_op: FailedOperation) {
+        self.failed_count += 1;
+        self.failed_operations.push(failed_op);
+        self.success = false;
+    }
+
+    /// Record a conflict.
+    pub fn record_conflict(&mut self, conflict: Conflict) {
+        self.conflict_count += 1;
+        self.conflicts.push(conflict);
+    }
+
+    /// Finalize the result with duration.
+    pub fn finalize(&mut self, start_time: Instant) {
+        self.duration_ms = start_time.elapsed().as_millis() as u64;
+        self.timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+    }
+
+    /// Get the number of retryable failures.
+    #[must_use]
+    pub fn retryable_count(&self) -> usize {
+        self.failed_operations
+            .iter()
+            .filter(|op| op.retryable)
+            .count()
+    }
+
+    /// Get the number of permanent failures.
+    #[must_use]
+    pub fn permanent_count(&self) -> usize {
+        self.failed_operations
+            .iter()
+            .filter(|op| !op.retryable)
+            .count()
     }
 }
 
@@ -1791,35 +1900,34 @@ impl SyncProcessor {
         session_id: &str,
         operations: Vec<Operation>,
     ) -> SyncProcessorResult {
-        let mut result = SyncProcessorResult::default();
+        let start_time = Instant::now();
+        let mut result = SyncProcessorResult::new();
 
         for operation in operations {
             // Check for conflicts before applying
             if let Some(mut conflict) = self.detect_conflict(session_id, &operation) {
                 let resolution = self.resolve_conflict(&conflict);
                 conflict.mark_resolved();
-                result.conflicts.push(conflict.clone());
+                result.record_conflict(conflict.clone());
 
                 match resolution {
                     ConflictResolution::KeepLocal => {
-                        // Skip this operation, count as conflict
-                        result.failed_count += 1;
-                        result.failed_operations.push(FailedOperation {
-                            operation: operation.clone(),
-                            error: format!("Conflict resolved: {}", conflict.reason),
-                        });
+                        // Skip this operation, count as conflict - retryable since state may change
+                        result.record_failure(FailedOperation::retryable(
+                            operation.clone(),
+                            format!("Conflict resolved: {}", conflict.reason),
+                        ));
                         continue;
                     }
                     ConflictResolution::KeepRemote => {
                         // Proceed to apply the operation
                     }
                     ConflictResolution::Merge => {
-                        // Merge not yet implemented, treat as KeepLocal
-                        result.failed_count += 1;
-                        result.failed_operations.push(FailedOperation {
-                            operation: operation.clone(),
-                            error: "Merge conflict resolution not implemented".to_string(),
-                        });
+                        // Merge not yet implemented - not retryable since merge will always fail
+                        result.record_failure(FailedOperation::permanent(
+                            operation.clone(),
+                            "Merge conflict resolution not implemented".to_string(),
+                        ));
                         continue;
                     }
                 }
@@ -1828,7 +1936,7 @@ impl SyncProcessor {
             // Apply the operation
             match self.apply_operation(session_id, &operation) {
                 Ok(()) => {
-                    result.processed_count += 1;
+                    result.record_success();
                     // Update timestamp tracking
                     match &operation {
                         Operation::AddElement { element, timestamp } => {
@@ -1844,14 +1952,24 @@ impl SyncProcessor {
                     }
                 }
                 Err(e) => {
-                    result.failed_count += 1;
-                    result.failed_operations.push(FailedOperation {
-                        operation: operation.clone(),
-                        error: e.to_string(),
-                    });
+                    // Store errors are generally retryable (transient issues)
+                    // except for specific permanent failures
+                    let retryable = matches!(
+                        &e,
+                        SyncError::LockPoisoned
+                            | SyncError::ElementNotFound(_)
+                            | SyncError::SessionNotFound(_)
+                    );
+                    result.record_failure(FailedOperation::new(
+                        operation.clone(),
+                        e.to_string(),
+                        retryable,
+                    ));
                 }
             }
         }
+
+        result.finalize(start_time);
         result
     }
 
@@ -4194,9 +4312,9 @@ mod tests {
         let store = Arc::new(SceneStore::new());
         let processor = SyncProcessor::new(store, ConflictStrategy::LastWriteWins);
         let result = processor.process_batch("default", vec![]);
-        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.synced_count, 0);
         assert_eq!(result.failed_count, 0);
-        assert!(result.success());
+        assert!(result.success);
     }
 
     #[test]
@@ -4215,9 +4333,9 @@ mod tests {
         }];
 
         let result = processor.process_batch("default", operations);
-        assert_eq!(result.processed_count, 1);
+        assert_eq!(result.synced_count, 1);
         assert_eq!(result.failed_count, 0);
-        assert!(result.success());
+        assert!(result.success);
 
         // Verify element was added
         let scene = store.get("default").expect("session should exist");
@@ -4237,9 +4355,9 @@ mod tests {
         }];
 
         let result = processor.process_batch("default", operations);
-        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.synced_count, 0);
         assert_eq!(result.failed_count, 1);
-        assert!(!result.success());
+        assert!(!result.success);
 
         // Verify the failed operation was tracked with error details
         assert_eq!(result.failed_operations.len(), 1);
@@ -4263,8 +4381,8 @@ mod tests {
             timestamp: Operation::now(),
         };
         let result = processor.process_batch("default", vec![add_op]);
-        assert_eq!(result.processed_count, 1);
-        assert!(result.success());
+        assert_eq!(result.synced_count, 1);
+        assert!(result.success);
 
         // Now update it
         let changes = serde_json::json!({
@@ -4279,8 +4397,8 @@ mod tests {
             timestamp: Operation::now(),
         };
         let result = processor.process_batch("default", vec![update_op]);
-        assert_eq!(result.processed_count, 1);
-        assert!(result.success());
+        assert_eq!(result.synced_count, 1);
+        assert!(result.success);
 
         // Verify the element was updated
         let scene = store.get("default").expect("scene should exist");
@@ -4306,7 +4424,7 @@ mod tests {
             timestamp: Operation::now(),
         };
         let result = processor.process_batch("default", vec![add_op]);
-        assert!(result.success());
+        assert!(result.success);
 
         // Verify element exists
         let scene = store.get("default").expect("scene should exist");
@@ -4318,8 +4436,8 @@ mod tests {
             timestamp: Operation::now(),
         };
         let result = processor.process_batch("default", vec![remove_op]);
-        assert_eq!(result.processed_count, 1);
-        assert!(result.success());
+        assert_eq!(result.synced_count, 1);
+        assert!(result.success);
 
         // Verify element was removed
         let scene = store.get("default").expect("scene should exist");
@@ -4350,8 +4468,8 @@ mod tests {
 
         // Process the interaction - it should succeed but not modify the store
         let result = processor.process_batch("default", vec![interaction_op]);
-        assert_eq!(result.processed_count, 1);
-        assert!(result.success());
+        assert_eq!(result.synced_count, 1);
+        assert!(result.success);
 
         // The scene should still be empty (interactions do not add elements)
         let document = store.scene_document("default");
@@ -4377,7 +4495,7 @@ mod tests {
         let result = processor.process_batch("default", vec![update_op]);
 
         // Should fail
-        assert!(!result.success());
+        assert!(!result.success);
         assert_eq!(result.failed_count, 1);
         assert_eq!(result.failed_operations.len(), 1);
         // Error should mention element not found
@@ -4568,9 +4686,9 @@ mod tests {
         let result = processor.process_batch("default", operations);
 
         // 2 successes, 1 failure
-        assert_eq!(result.processed_count, 2);
+        assert_eq!(result.synced_count, 2);
         assert_eq!(result.failed_count, 1);
-        assert!(!result.success());
+        assert!(!result.success);
         assert_eq!(result.failed_operations.len(), 1);
     }
 
@@ -4881,5 +4999,121 @@ mod tests {
             .conflicts
             .push(Conflict::new(op, ConflictReason::ElementNotFound));
         assert_eq!(result2.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_processor_result_metrics() {
+        let mut result = SyncProcessorResult::new();
+        assert!(result.success);
+        assert_eq!(result.synced_count, 0);
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(result.conflict_count, 0);
+        assert!(result.timestamp > 0);
+
+        result.record_success();
+        assert_eq!(result.synced_count, 1);
+        assert!(result.success);
+
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        result.record_failure(FailedOperation::retryable(
+            op.clone(),
+            "element not found".to_string(),
+        ));
+        assert_eq!(result.failed_count, 1);
+        assert!(!result.success);
+
+        let conflict = Conflict::new(op, ConflictReason::ElementNotFound);
+        result.record_conflict(conflict);
+        assert_eq!(result.conflict_count, 1);
+    }
+
+    #[test]
+    fn test_sync_processor_result_timing() {
+        let start = std::time::Instant::now();
+        let mut result = SyncProcessorResult::new();
+
+        // Simulate some work
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        result.finalize(start);
+
+        // Duration should be at least 10ms
+        assert!(result.duration_ms >= 10);
+        // Timestamp should be recent (within last minute)
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        assert!(result.timestamp > now_ms - 60_000);
+        assert!(result.timestamp <= now_ms);
+    }
+
+    #[test]
+    fn test_failed_operation_retryable_flag() {
+        let op = Operation::AddElement {
+            element: Element::new(ElementKind::Text {
+                content: "Test".to_string(),
+                font_size: 16.0,
+                color: "#000000".to_string(),
+            }),
+            timestamp: 100,
+        };
+
+        let retryable_failure =
+            FailedOperation::retryable(op.clone(), "temporary error".to_string());
+        assert!(retryable_failure.retryable);
+        assert_eq!(retryable_failure.error, "temporary error");
+
+        let permanent_failure = FailedOperation::permanent(op.clone(), "invalid data".to_string());
+        assert!(!permanent_failure.retryable);
+        assert_eq!(permanent_failure.error, "invalid data");
+    }
+
+    #[test]
+    fn test_sync_processor_result_retryable_counts() {
+        let mut result = SyncProcessorResult::new();
+
+        let op1 = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        let op2 = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 101,
+        };
+        let op3 = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 102,
+        };
+
+        result.record_failure(FailedOperation::retryable(op1, "error1".to_string()));
+        result.record_failure(FailedOperation::permanent(op2, "error2".to_string()));
+        result.record_failure(FailedOperation::retryable(op3, "error3".to_string()));
+
+        assert_eq!(result.failed_count, 3);
+        assert_eq!(result.retryable_count(), 2);
+        assert_eq!(result.permanent_count(), 1);
+    }
+
+    #[test]
+    fn test_sync_processor_result_serialization() {
+        let mut result = SyncProcessorResult::new();
+        result.record_success();
+
+        let op = Operation::RemoveElement {
+            id: canvas_core::ElementId::new(),
+            timestamp: 100,
+        };
+        result.record_failure(FailedOperation::retryable(op, "test error".to_string()));
+
+        // Should serialize without panic
+        let json = serde_json::to_string(&result).expect("should serialize");
+        assert!(json.contains(r#""success":false"#));
+        assert!(json.contains(r#""synced_count":1"#));
+        assert!(json.contains(r#""failed_count":1"#));
+        assert!(json.contains(r#""retryable":true"#));
     }
 }
