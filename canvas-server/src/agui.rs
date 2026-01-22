@@ -68,11 +68,88 @@ pub enum AgUiEvent {
         timestamp: u64,
     },
 
+    /// User interaction event (touch, button click, form input).
+    #[serde(rename = "interaction")]
+    Interaction {
+        /// Session identifier.
+        session_id: String,
+        /// The interaction details.
+        interaction: InteractionEvent,
+        /// Unix timestamp in milliseconds (for precise timing).
+        timestamp: u64,
+    },
+
     /// Heartbeat to keep the connection alive.
     #[serde(rename = "heartbeat")]
     Heartbeat {
         /// Unix timestamp in seconds.
         timestamp: u64,
+    },
+}
+
+/// User interaction event types for AG-UI protocol.
+///
+/// These events are sent from the canvas client when users interact
+/// with rendered elements, allowing AI agents to respond to user input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InteractionEvent {
+    /// Touch/pointer event (tap, drag, pinch).
+    Touch {
+        /// Element ID that was touched (if any).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        element_id: Option<String>,
+        /// Touch phase: "start", "move", "end", "cancel".
+        phase: String,
+        /// X coordinate in canvas space.
+        x: f32,
+        /// Y coordinate in canvas space.
+        y: f32,
+        /// Pointer ID for multi-touch tracking.
+        #[serde(default)]
+        pointer_id: u32,
+    },
+
+    /// Button click event.
+    ButtonClick {
+        /// ID of the clicked button element.
+        element_id: String,
+        /// Action identifier from the A2UI Button component.
+        action: String,
+    },
+
+    /// Form input event.
+    FormInput {
+        /// ID of the input element.
+        element_id: String,
+        /// Input field name.
+        field: String,
+        /// Current input value.
+        value: String,
+    },
+
+    /// Element selection event.
+    Selection {
+        /// ID of the selected element.
+        element_id: String,
+        /// Whether the element is now selected.
+        selected: bool,
+    },
+
+    /// Gesture event (pinch, rotate, etc.).
+    Gesture {
+        /// Gesture type: "pinch", "rotate", "pan".
+        gesture_type: String,
+        /// Gesture scale factor (for pinch).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+        /// Gesture rotation in degrees (for rotate).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rotation: Option<f32>,
+        /// Center X coordinate.
+        center_x: f32,
+        /// Center Y coordinate.
+        center_y: f32,
     },
 }
 
@@ -118,9 +195,52 @@ pub struct AgUiState {
 
 impl AgUiState {
     /// Create a new AG-UI state with the given scene.
+    ///
+    /// This also starts a background task that forwards interaction events
+    /// from WebSocket clients (via `SyncState`) to AG-UI SSE clients.
     pub fn new(sync: SyncState) -> Self {
         let (event_tx, _) = broadcast::channel(100);
-        Self { event_tx, sync }
+        let state = Self { event_tx, sync };
+
+        // Spawn background task to relay interactions from sync to AG-UI
+        state.start_interaction_relay();
+
+        state
+    }
+
+    /// Start a background task that relays interaction events from SyncState to AG-UI clients.
+    fn start_interaction_relay(&self) {
+        let mut interaction_rx = self.sync.subscribe_interactions();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match interaction_rx.recv().await {
+                    Ok((session_id, interaction)) => {
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+
+                        let event = AgUiEvent::Interaction {
+                            session_id,
+                            interaction,
+                            timestamp,
+                        };
+
+                        // Forward to AG-UI SSE clients
+                        let _ = event_tx.send(event);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("Interaction relay channel closed, stopping");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Interaction relay lagged by {n} messages");
+                    }
+                }
+            }
+        });
     }
 
     /// Broadcast an AG-UI event to all connected clients.
@@ -134,6 +254,26 @@ impl AgUiState {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Broadcast an interaction event to all connected AG-UI clients.
+    ///
+    /// This should be called when a user interacts with the canvas
+    /// (touch, button click, form input, etc.).
+    pub fn broadcast_interaction(&self, session_id: &str, interaction: InteractionEvent) {
+        self.broadcast(AgUiEvent::Interaction {
+            session_id: session_id.to_string(),
+            interaction,
+            timestamp: Self::timestamp_millis(),
+        });
+    }
+
+    /// Get the current timestamp in milliseconds (for interaction events).
+    fn timestamp_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
 
@@ -205,6 +345,7 @@ pub async fn stream_handler(
         let event_type = match &event {
             AgUiEvent::SceneUpdate { .. } => "scene_update",
             AgUiEvent::A2UIRender { .. } => "a2ui_render",
+            AgUiEvent::Interaction { .. } => "interaction",
             AgUiEvent::Heartbeat { .. } => "heartbeat",
         };
 
@@ -294,8 +435,8 @@ mod tests {
         assert!(request.clear);
     }
 
-    #[test]
-    fn test_agui_state_render_a2ui() {
+    #[tokio::test]
+    async fn test_agui_state_render_a2ui() {
         let state = AgUiState::new(SyncState::new());
 
         let tree = A2UITree::from_json(
@@ -333,8 +474,8 @@ mod tests {
         assert_eq!(scene.element_count(), 2);
     }
 
-    #[test]
-    fn test_agui_state_render_without_clear() {
+    #[tokio::test]
+    async fn test_agui_state_render_without_clear() {
         let state = AgUiState::new(SyncState::new());
 
         // First render
@@ -366,8 +507,8 @@ mod tests {
         assert_eq!(scene.element_count(), 2);
     }
 
-    #[test]
-    fn test_agui_state_render_with_clear() {
+    #[tokio::test]
+    async fn test_agui_state_render_with_clear() {
         let state = AgUiState::new(SyncState::new());
 
         // First render
@@ -399,8 +540,8 @@ mod tests {
         assert_eq!(scene.element_count(), 1);
     }
 
-    #[test]
-    fn test_broadcast_event() {
+    #[tokio::test]
+    async fn test_broadcast_event() {
         let state = AgUiState::new(SyncState::new());
 
         // Subscribe before broadcasting
@@ -415,5 +556,157 @@ mod tests {
             AgUiEvent::Heartbeat { timestamp } => assert_eq!(timestamp, 12345),
             _ => panic!("Expected Heartbeat event"),
         }
+    }
+
+    #[test]
+    fn test_interaction_touch_event_serialization() {
+        let event = InteractionEvent::Touch {
+            element_id: Some("btn-1".to_string()),
+            phase: "start".to_string(),
+            x: 100.0,
+            y: 200.0,
+            pointer_id: 0,
+        };
+
+        let json = serde_json::to_string(&event).expect("should serialize");
+        assert!(json.contains("touch"));
+        assert!(json.contains("btn-1"));
+        assert!(json.contains("start"));
+        assert!(json.contains("100"));
+    }
+
+    #[test]
+    fn test_interaction_button_click_serialization() {
+        let event = InteractionEvent::ButtonClick {
+            element_id: "submit-btn".to_string(),
+            action: "form_submit".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).expect("should serialize");
+        assert!(json.contains("button_click"));
+        assert!(json.contains("submit-btn"));
+        assert!(json.contains("form_submit"));
+    }
+
+    #[test]
+    fn test_interaction_form_input_serialization() {
+        let event = InteractionEvent::FormInput {
+            element_id: "name-input".to_string(),
+            field: "username".to_string(),
+            value: "alice".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).expect("should serialize");
+        assert!(json.contains("form_input"));
+        assert!(json.contains("name-input"));
+        assert!(json.contains("username"));
+        assert!(json.contains("alice"));
+    }
+
+    #[test]
+    fn test_interaction_event_deserialization() {
+        // Touch event
+        let json = r#"{"type":"touch","element_id":"el-1","phase":"move","x":50.5,"y":75.0,"pointer_id":1}"#;
+        let event: InteractionEvent = serde_json::from_str(json).expect("should deserialize");
+        match event {
+            InteractionEvent::Touch {
+                element_id,
+                phase,
+                x,
+                y,
+                pointer_id,
+            } => {
+                assert_eq!(element_id, Some("el-1".to_string()));
+                assert_eq!(phase, "move");
+                assert!((x - 50.5).abs() < 0.001);
+                assert!((y - 75.0).abs() < 0.001);
+                assert_eq!(pointer_id, 1);
+            }
+            _ => panic!("Expected Touch event"),
+        }
+
+        // Button click
+        let json = r#"{"type":"button_click","element_id":"btn","action":"click"}"#;
+        let event: InteractionEvent = serde_json::from_str(json).expect("should deserialize");
+        match event {
+            InteractionEvent::ButtonClick { element_id, action } => {
+                assert_eq!(element_id, "btn");
+                assert_eq!(action, "click");
+            }
+            _ => panic!("Expected ButtonClick event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_interaction() {
+        let state = AgUiState::new(SyncState::new());
+        let mut rx = state.event_tx.subscribe();
+
+        // Broadcast an interaction
+        let interaction = InteractionEvent::ButtonClick {
+            element_id: "test-btn".to_string(),
+            action: "submit".to_string(),
+        };
+        state.broadcast_interaction("session-1", interaction);
+
+        // Should receive the interaction event
+        let received = rx.try_recv().expect("should receive");
+        match received {
+            AgUiEvent::Interaction {
+                session_id,
+                interaction,
+                timestamp,
+            } => {
+                assert_eq!(session_id, "session-1");
+                assert!(timestamp > 0);
+                match interaction {
+                    InteractionEvent::ButtonClick { element_id, action } => {
+                        assert_eq!(element_id, "test-btn");
+                        assert_eq!(action, "submit");
+                    }
+                    _ => panic!("Expected ButtonClick interaction"),
+                }
+            }
+            _ => panic!("Expected Interaction event"),
+        }
+    }
+
+    #[test]
+    fn test_agui_interaction_event_serialization() {
+        let event = AgUiEvent::Interaction {
+            session_id: "default".to_string(),
+            interaction: InteractionEvent::Touch {
+                element_id: None,
+                phase: "end".to_string(),
+                x: 0.0,
+                y: 0.0,
+                pointer_id: 0,
+            },
+            timestamp: 1234567890123,
+        };
+
+        let json = serde_json::to_string(&event).expect("should serialize");
+        assert!(json.contains("interaction"));
+        assert!(json.contains("default"));
+        assert!(json.contains("touch"));
+        assert!(json.contains("1234567890123"));
+    }
+
+    #[test]
+    fn test_gesture_event_serialization() {
+        let event = InteractionEvent::Gesture {
+            gesture_type: "pinch".to_string(),
+            scale: Some(1.5),
+            rotation: None,
+            center_x: 400.0,
+            center_y: 300.0,
+        };
+
+        let json = serde_json::to_string(&event).expect("should serialize");
+        assert!(json.contains("gesture"));
+        assert!(json.contains("pinch"));
+        assert!(json.contains("1.5"));
+        // rotation should not be present when None
+        assert!(!json.contains("rotation"));
     }
 }

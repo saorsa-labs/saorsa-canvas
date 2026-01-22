@@ -54,6 +54,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::agui::InteractionEvent;
 use crate::communitas::CommunitasMcpClient;
 use crate::metrics::{record_rate_limited, record_validation_failure};
 use crate::validation::{
@@ -257,6 +258,21 @@ pub enum ClientMessage {
     },
     /// Leave the current Communitas call.
     LeaveCommunitasCall {
+        /// Optional message ID for acknowledgment.
+        #[serde(default)]
+        message_id: Option<String>,
+    },
+
+    // === Interaction Events (AG-UI) ===
+    /// Report a user interaction on the canvas.
+    Interaction {
+        /// Interaction type: "touch", "button_click", "form_input", "selection", "gesture".
+        interaction_type: String,
+        /// Element ID involved in the interaction (if any).
+        #[serde(default)]
+        element_id: Option<String>,
+        /// Interaction-specific data.
+        data: serde_json::Value,
         /// Optional message ID for acknowledgment.
         #[serde(default)]
         message_id: Option<String>,
@@ -627,6 +643,8 @@ pub struct SyncState {
     store: SceneStore,
     /// Broadcast channel for sync events.
     event_tx: broadcast::Sender<SyncEvent>,
+    /// Broadcast channel for interaction events (session_id, event).
+    interaction_tx: broadcast::Sender<(String, InteractionEvent)>,
     /// Offline queue for reconnection support.
     #[allow(dead_code)]
     offline_queue: Arc<RwLock<OfflineQueue>>,
@@ -646,9 +664,11 @@ impl SyncState {
     #[must_use]
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(100);
+        let (interaction_tx, _) = broadcast::channel(100);
         Self {
             store: SceneStore::new(),
             event_tx,
+            interaction_tx,
             offline_queue: Arc::new(RwLock::new(OfflineQueue::new())),
             peers: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
@@ -1320,6 +1340,25 @@ impl SyncState {
     #[must_use]
     pub fn sender(&self) -> broadcast::Sender<SyncEvent> {
         self.event_tx.clone()
+    }
+
+    /// Subscribe to interaction events.
+    ///
+    /// Returns a receiver that yields `(session_id, InteractionEvent)` tuples
+    /// for each interaction event broadcast by WebSocket clients.
+    #[must_use]
+    pub fn subscribe_interactions(&self) -> broadcast::Receiver<(String, InteractionEvent)> {
+        self.interaction_tx.subscribe()
+    }
+
+    /// Broadcast an interaction event from a WebSocket client.
+    ///
+    /// This allows AG-UI clients to receive user interactions in real-time.
+    pub fn broadcast_interaction(&self, session_id: &str, interaction: InteractionEvent) {
+        // Ignore send errors (no receivers is okay)
+        let _ = self
+            .interaction_tx
+            .send((session_id.to_string(), interaction));
     }
 
     /// Get or create a scene for the given session ID.
@@ -2102,6 +2141,128 @@ impl ClientConnection {
                     state.send_to_peer(&peer_id, message);
                 });
                 None
+            }
+
+            ClientMessage::Interaction {
+                interaction_type,
+                element_id,
+                data,
+                message_id,
+            } => {
+                // Convert to AG-UI interaction event and broadcast
+                use crate::agui::InteractionEvent;
+
+                let interaction = match interaction_type.as_str() {
+                    "touch" => {
+                        let phase = data
+                            .get("phase")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("start")
+                            .to_string();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let x = data.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let y = data.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let pointer_id =
+                            data.get("pointer_id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+                        InteractionEvent::Touch {
+                            element_id,
+                            phase,
+                            x,
+                            y,
+                            pointer_id,
+                        }
+                    }
+                    "button_click" => {
+                        let action = data
+                            .get("action")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("click")
+                            .to_string();
+
+                        InteractionEvent::ButtonClick {
+                            element_id: element_id.unwrap_or_default(),
+                            action,
+                        }
+                    }
+                    "form_input" => {
+                        let field = data
+                            .get("field")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("input")
+                            .to_string();
+                        let value = data
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        InteractionEvent::FormInput {
+                            element_id: element_id.unwrap_or_default(),
+                            field,
+                            value,
+                        }
+                    }
+                    "selection" => {
+                        let selected = data
+                            .get("selected")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+
+                        InteractionEvent::Selection {
+                            element_id: element_id.unwrap_or_default(),
+                            selected,
+                        }
+                    }
+                    "gesture" => {
+                        let gesture_type = data
+                            .get("gesture_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pinch")
+                            .to_string();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scale = data.get("scale").and_then(|v| v.as_f64()).map(|s| s as f32);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let rotation = data
+                            .get("rotation")
+                            .and_then(|v| v.as_f64())
+                            .map(|r| r as f32);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let center_x =
+                            data.get("center_x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let center_y =
+                            data.get("center_y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+                        InteractionEvent::Gesture {
+                            gesture_type,
+                            scale,
+                            rotation,
+                            center_x,
+                            center_y,
+                        }
+                    }
+                    _ => {
+                        return Some(ServerMessage::Error {
+                            code: "INVALID_INTERACTION".to_string(),
+                            message: format!("Unknown interaction type: {interaction_type}"),
+                            message_id,
+                        });
+                    }
+                };
+
+                // Broadcast to AG-UI clients via the interaction channel
+                self.state
+                    .broadcast_interaction(&self.session_id, interaction);
+
+                // Acknowledge if message_id was provided
+                message_id.map(|id| ServerMessage::Ack {
+                    message_id: id,
+                    success: true,
+                    result: None,
+                })
             }
         }
     }
