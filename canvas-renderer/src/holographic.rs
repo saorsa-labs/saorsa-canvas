@@ -11,7 +11,9 @@
 //! 3. The result is a QuiltRenderTarget with all views rendered
 //! ```
 
-use crate::quilt::{Quilt, QuiltRenderSettings, QuiltRenderTarget};
+use crate::backend::wgpu::{Viewport, WgpuBackend};
+use crate::error::RenderResult;
+use crate::quilt::{Quilt, QuiltRenderSettings, QuiltRenderTarget, QuiltView};
 use crate::spatial::{Camera, HolographicConfig};
 use canvas_core::Scene;
 use serde::{Deserialize, Serialize};
@@ -177,6 +179,35 @@ impl HolographicRenderer {
             (color[2].clamp(0.0, 1.0) * 255.0) as u8,
             (color[3].clamp(0.0, 1.0) * 255.0) as u8,
         ]
+    }
+
+    /// Render a single view of the quilt using the GPU backend.
+    ///
+    /// This renders the scene from the view's camera perspective to the
+    /// specified viewport region. Used for GPU-accelerated quilt rendering.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The wgpu rendering backend
+    /// * `scene` - The scene to render
+    /// * `view` - The quilt view containing camera and viewport info
+    ///
+    /// # Errors
+    ///
+    /// Returns a `RenderError` if:
+    /// - The viewport is invalid (zero dimensions or out of bounds)
+    /// - The frame rendering fails
+    pub fn render_view(
+        &self,
+        backend: &mut WgpuBackend,
+        scene: &Scene,
+        view: &QuiltView,
+    ) -> RenderResult<()> {
+        // Create viewport from QuiltView dimensions
+        let viewport = Viewport::new(view.x_offset, view.y_offset, view.width, view.height);
+
+        // Render the scene with this view's camera and viewport
+        backend.render_with_camera(scene, Some(&view.camera), Some(viewport))
     }
 
     /// Placeholder view rendering (demonstrates quilt layout).

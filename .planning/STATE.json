@@ -14,10 +14,10 @@
   },
   "progress": {
     "total_tasks": 8,
-    "completed_tasks": 2,
-    "current_task": "Task 3: View camera unit tests"
+    "completed_tasks": 3,
+    "current_task": "Task 4: Per-view scene rendering"
   },
   "status": "awaiting_user",
-  "last_updated": "2026-01-22T14:00:00Z",
-  "notes": "Phase 6 in progress. Task 2 (camera projection integration) complete."
+  "last_updated": "2026-01-22T15:30:00Z",
+  "notes": "Phase 6 in progress. Task 3 (view camera unit tests) complete with review."
 }
