@@ -2132,7 +2132,12 @@ impl WgpuBackend {
             element.transform.height,
         ];
         // use_camera = 1.0 to enable 3D mode
-        let canvas_size = [ctx.texture_width as f32, ctx.texture_height as f32, 1.0, 0.0];
+        let canvas_size = [
+            ctx.texture_width as f32,
+            ctx.texture_height as f32,
+            1.0,
+            0.0,
+        ];
 
         // Default to a gray color for all elements (placeholder)
         // In a full implementation, we'd handle each element type
