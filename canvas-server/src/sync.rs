@@ -1953,8 +1953,9 @@ impl SyncProcessor {
                 }
                 Err(e) => {
                     // Store errors are generally retryable (transient issues)
-                    // except for specific permanent failures
-                    let retryable = matches!(
+                    // except for specific permanent failures like missing resources
+                    // or lock poisoning which indicate unrecoverable state
+                    let retryable = !matches!(
                         &e,
                         SyncError::LockPoisoned
                             | SyncError::ElementNotFound(_)
