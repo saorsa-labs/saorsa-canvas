@@ -9,8 +9,8 @@ description = "MCP tools and resources for Saorsa Canvas. Extends Communitas MCP
 
 [dependencies]
 # Core crates
-canvas-core = { path = "../canvas-core" }
-canvas-renderer = { path = "../canvas-renderer" }
+canvas-core = { path = "../canvas-core", version = "0.1.2" }
+canvas-renderer = { path = "../canvas-renderer", version = "0.1.2" }
 
 # Async runtime
 tokio.workspace = true

@@ -220,7 +220,7 @@ async fn manifest_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
         [("Content-Type", "application/manifest+json")],
-        include_str!("../../web/manifest.json"),
+        include_str!("../web/manifest.json"),
     )
 }
 
@@ -229,7 +229,7 @@ async fn sw_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
         [("Content-Type", "application/javascript")],
-        include_str!("../../web/sw.js"),
+        include_str!("../web/sw.js"),
     )
 }
 

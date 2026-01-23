@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+include = ["src/**/*", "web/**/*", "Cargo.toml"]
 
 description = "Local embedded Axum server for Saorsa Canvas. Serves the PWA and handles WebRTC signaling."
 
@@ -17,9 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Core crates
-canvas-core = { path = "../canvas-core" }
-canvas-renderer = { path = "../canvas-renderer" }
-canvas-mcp = { path = "../canvas-mcp" }
+canvas-core = { path = "../canvas-core", version = "0.1.2" }
+canvas-renderer = { path = "../canvas-renderer", version = "0.1.2" }
+canvas-mcp = { path = "../canvas-mcp", version = "0.1.2" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 

@@ -816,19 +816,17 @@ mod tests {
         // All generated cameras should preserve FOV, near, far, and up
         for i in 0..config.num_views {
             let view_cam = config.camera_for_view(&base, i);
-            assert!(approx_eq(view_cam.fov, base.fov), "View {} FOV mismatch", i);
+            assert!(approx_eq(view_cam.fov, base.fov), "View {i} FOV mismatch");
             assert!(
                 approx_eq(view_cam.near, base.near),
-                "View {} near mismatch",
-                i
+                "View {i} near mismatch"
             );
-            assert!(approx_eq(view_cam.far, base.far), "View {} far mismatch", i);
+            assert!(approx_eq(view_cam.far, base.far), "View {i} far mismatch");
             assert!(
                 approx_eq(view_cam.up.x, base.up.x)
                     && approx_eq(view_cam.up.y, base.up.y)
                     && approx_eq(view_cam.up.z, base.up.z),
-                "View {} up vector mismatch",
-                i
+                "View {i} up vector mismatch"
             );
         }
     }
@@ -887,10 +885,7 @@ mod tests {
             let view_distance = view_cam.position.sub(&view_cam.target).length();
             assert!(
                 approx_eq(view_distance, base_distance),
-                "View {} distance {} should match base {}",
-                i,
-                view_distance,
-                base_distance
+                "View {i} distance {view_distance} should match base {base_distance}"
             );
             // Target should be unchanged
             assert!(approx_eq(view_cam.target.x, base.target.x));

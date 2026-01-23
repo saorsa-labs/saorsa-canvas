@@ -278,11 +278,8 @@ async fn test_multiple_concurrent_interactions() {
 
     // Should receive all 5 interactions
     let mut received_count = 0;
-    loop {
-        match timeout(Duration::from_millis(50), rx.recv()).await {
-            Ok(Ok(_)) => received_count += 1,
-            _ => break,
-        }
+    while let Ok(Ok(_)) = timeout(Duration::from_millis(50), rx.recv()).await {
+        received_count += 1;
     }
 
     assert_eq!(received_count, 5, "Should receive all 5 interactions");

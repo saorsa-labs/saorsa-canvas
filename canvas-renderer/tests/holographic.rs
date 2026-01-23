@@ -72,7 +72,7 @@ fn integration_scene_to_quilt_with_elements() {
 
     // Verify rendering completed
     assert_eq!(result.view_count, 4);
-    assert!(result.target.pixels.len() > 0);
+    assert!(!result.target.pixels.is_empty());
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn render_empty_scene() {
 
     // Should not panic on empty scene
     let result = renderer.render_quilt(&scene, &camera);
-    assert!(result.target.pixels.len() > 0);
+    assert!(!result.target.pixels.is_empty());
 }
 
 #[test]

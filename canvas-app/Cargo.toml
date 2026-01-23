@@ -19,9 +19,9 @@ default = []
 [dependencies]
 # Core canvas types and renderer
 # Enable wasm feature for proper UUID generation in browser (uses crypto.getRandomValues)
-canvas-core = { path = "../canvas-core", features = ["wasm"] }
+canvas-core = { path = "../canvas-core", version = "0.1.2", features = ["wasm"] }
 # Note: charts and images features disabled for WASM (plotters/image crates don't support wasm32)
-canvas-renderer = { path = "../canvas-renderer", default-features = false, features = ["wasm"] }
+canvas-renderer = { path = "../canvas-renderer", version = "0.1.2", default-features = false, features = ["wasm"] }
 
 # Serialization
 serde.workspace = true

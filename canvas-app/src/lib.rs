@@ -777,7 +777,7 @@ impl CanvasApp {
 
     /// Render the current scene as a holographic quilt.
     ///
-    /// Returns the quilt as RGBA pixel data (Vec<u8>).
+    /// Returns the quilt as RGBA pixel data (`Vec<u8>`).
     /// The dimensions can be obtained from `getQuiltDimensions()`.
     ///
     /// # Errors
@@ -1221,19 +1221,52 @@ mod tests {
 
     wasm_bindgen_test_configure!(run_in_browser);
 
+    /// Create a test canvas element in the DOM and return a `CanvasApp` instance.
+    ///
+    /// This helper creates a unique canvas element for each test to avoid conflicts.
+    fn create_test_app(width: u32, height: u32) -> CanvasApp {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        let id = format!("test-canvas-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
+
+        let window = web_sys::window().expect("no window");
+        let document = window.document().expect("no document");
+
+        // Create canvas element
+        let canvas = document
+            .create_element("canvas")
+            .expect("failed to create canvas")
+            .dyn_into::<HtmlCanvasElement>()
+            .expect("not a canvas");
+        canvas.set_id(&id);
+        canvas.set_width(width);
+        canvas.set_height(height);
+
+        // Add to document body
+        document
+            .body()
+            .expect("no body")
+            .append_child(&canvas)
+            .expect("failed to append canvas");
+
+        CanvasApp::new(&id).expect("failed to create CanvasApp")
+    }
+
     // ============================================================================
     // Holographic Configuration Tests
     // ============================================================================
 
     #[wasm_bindgen_test]
     fn test_set_holographic_config_portrait() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
         // Initially not in holographic mode
         assert!(!app.is_holographic_mode());
 
         // Set holographic config
-        app.set_holographic_config("portrait".to_string());
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Now should be in holographic mode
         assert!(app.is_holographic_mode());
@@ -1241,37 +1274,38 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_set_holographic_config_4k() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
-        app.set_holographic_config("4k".to_string());
+        app.set_holographic_config("4k").expect("config failed");
 
         assert!(app.is_holographic_mode());
     }
 
     #[wasm_bindgen_test]
     fn test_set_holographic_config_8k() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
-        app.set_holographic_config("8k".to_string());
+        app.set_holographic_config("8k").expect("config failed");
 
         assert!(app.is_holographic_mode());
     }
 
     #[wasm_bindgen_test]
     fn test_set_holographic_config_go() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
-        app.set_holographic_config("go".to_string());
+        app.set_holographic_config("go").expect("config failed");
 
         assert!(app.is_holographic_mode());
     }
 
     #[wasm_bindgen_test]
     fn test_set_holographic_config_unknown_defaults_to_portrait() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
         // Unknown preset should default to portrait
-        app.set_holographic_config("unknown_preset".to_string());
+        app.set_holographic_config("unknown_preset")
+            .expect("config failed");
 
         assert!(app.is_holographic_mode());
     }
@@ -1282,8 +1316,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_dimensions_portrait() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         let dims = app.get_quilt_dimensions();
 
@@ -1294,8 +1329,8 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_dimensions_4k() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("4k".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("4k").expect("config failed");
 
         let dims = app.get_quilt_dimensions();
 
@@ -1306,7 +1341,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_dimensions_not_in_holographic_mode() {
-        let app = CanvasApp::new(800.0, 600.0);
+        let app = create_test_app(800, 600);
 
         let dims = app.get_quilt_dimensions();
 
@@ -1321,14 +1356,14 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_set_holographic_camera() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Set camera position and target
         app.set_holographic_camera(
             0.0, 0.0, 5.0, // position
             0.0, 0.0, 0.0, // target
-            0.0, 1.0, 0.0, // up
         );
 
         // Should still be in holographic mode
@@ -1337,13 +1372,12 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_set_holographic_camera_not_in_holographic_mode() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
         // Set camera without holographic mode enabled (should be a no-op)
         app.set_holographic_camera(
             0.0, 0.0, 5.0, // position
             0.0, 0.0, 0.0, // target
-            0.0, 1.0, 0.0, // up
         );
 
         // Should still not be in holographic mode
@@ -1356,44 +1390,24 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_holographic_preset_portrait() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         let preset = app.get_holographic_preset();
 
-        // Verify preset structure
-        assert_eq!(
-            js_sys::Reflect::get(&preset, &"numViews".into()).unwrap(),
-            45
-        );
-        assert_eq!(
-            js_sys::Reflect::get(&preset, &"quiltColumns".into()).unwrap(),
-            5
-        );
-        assert_eq!(
-            js_sys::Reflect::get(&preset, &"quiltRows".into()).unwrap(),
-            9
-        );
-        assert_eq!(
-            js_sys::Reflect::get(&preset, &"viewWidth".into()).unwrap(),
-            420
-        );
-        assert_eq!(
-            js_sys::Reflect::get(&preset, &"viewHeight".into()).unwrap(),
-            560
-        );
+        // Verify preset name
+        assert_eq!(preset, "portrait");
     }
 
     #[wasm_bindgen_test]
     fn test_get_holographic_preset_not_in_mode() {
-        let app = CanvasApp::new(800.0, 600.0);
+        let app = create_test_app(800, 600);
 
         let preset = app.get_holographic_preset();
 
-        // Not in holographic mode, should return empty object
-        assert!(js_sys::Reflect::get(&preset, &"numViews".into())
-            .unwrap()
-            .is_undefined());
+        // Not in holographic mode, should return "none"
+        assert_eq!(preset, "none");
     }
 
     // ============================================================================
@@ -1402,8 +1416,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_view_info_valid_index() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Get first view (index 0)
         let view_info = app.get_quilt_view_info(0);
@@ -1433,8 +1448,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_view_info_last_view() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Get last view (index 44 for portrait with 45 views)
         let view_info = app.get_quilt_view_info(44);
@@ -1447,8 +1463,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_view_info_out_of_bounds() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Get view with invalid index (> 44)
         let view_info = app.get_quilt_view_info(100);
@@ -1461,7 +1478,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_quilt_view_info_not_in_holographic_mode() {
-        let app = CanvasApp::new(800.0, 600.0);
+        let app = create_test_app(800, 600);
 
         let view_info = app.get_quilt_view_info(0);
 
@@ -1477,8 +1494,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_holographic_stats_initial() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         let stats = app.get_holographic_stats();
 
@@ -1503,7 +1521,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_get_holographic_stats_not_in_mode() {
-        let app = CanvasApp::new(800.0, 600.0);
+        let app = create_test_app(800, 600);
 
         let stats = app.get_holographic_stats();
 
@@ -1516,8 +1534,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_reset_holographic_stats() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Reset stats (should not panic even with no renders)
         app.reset_holographic_stats();
@@ -1531,7 +1550,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_reset_holographic_stats_not_in_mode() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
         // Reset stats without holographic mode (should be a no-op)
         app.reset_holographic_stats();
@@ -1546,54 +1565,55 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_render_quilt_returns_pixels() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
-        let result = app.render_quilt();
+        let result = app.render_quilt().expect("render_quilt failed");
 
-        // Should return a Uint8ClampedArray with pixel data
+        // Should return pixel data
         // Portrait: 2100 × 5040 × 4 (RGBA) = 42,336,000 bytes
-        let array = js_sys::Uint8ClampedArray::from(result);
-        assert!(array.length() > 0);
+        assert!(!result.is_empty());
     }
 
     #[wasm_bindgen_test]
     fn test_render_quilt_not_in_holographic_mode() {
-        let mut app = CanvasApp::new(800.0, 600.0);
+        let mut app = create_test_app(800, 600);
 
         let result = app.render_quilt();
 
-        // Not in holographic mode should return empty array
-        let array = js_sys::Uint8ClampedArray::from(result);
-        assert_eq!(array.length(), 0);
+        // Not in holographic mode should return an error
+        assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     fn test_render_quilt_updates_stats() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Render once
         let _ = app.render_quilt();
 
         let stats = app.get_holographic_stats();
-        let frames: f64 = js_sys::Reflect::get(&stats, &"framesRendered".into())
+        let frames = js_sys::Reflect::get(&stats, &"framesRendered".into())
             .unwrap()
             .as_f64()
             .unwrap();
-        assert_eq!(frames, 1.0);
+        assert!((frames - 1.0).abs() < f64::EPSILON);
 
-        let views: f64 = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
+        let views = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
             .unwrap()
             .as_f64()
             .unwrap();
-        assert_eq!(views, 45.0); // Portrait has 45 views
+        assert!((views - 45.0).abs() < f64::EPSILON); // Portrait has 45 views
     }
 
     #[wasm_bindgen_test]
     fn test_render_quilt_multiple_frames() {
-        let mut app = CanvasApp::new(800.0, 600.0);
-        app.set_holographic_config("portrait".to_string());
+        let mut app = create_test_app(800, 600);
+        app.set_holographic_config("portrait")
+            .expect("config failed");
 
         // Render multiple times
         for _ in 0..3 {
@@ -1601,16 +1621,16 @@ mod tests {
         }
 
         let stats = app.get_holographic_stats();
-        let frames: f64 = js_sys::Reflect::get(&stats, &"framesRendered".into())
+        let frames = js_sys::Reflect::get(&stats, &"framesRendered".into())
             .unwrap()
             .as_f64()
             .unwrap();
-        assert_eq!(frames, 3.0);
+        assert!((frames - 3.0).abs() < f64::EPSILON);
 
-        let views: f64 = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
+        let views = js_sys::Reflect::get(&stats, &"totalViewsRendered".into())
             .unwrap()
             .as_f64()
             .unwrap();
-        assert_eq!(views, 135.0); // 45 views × 3 frames
+        assert!((views - 135.0).abs() < f64::EPSILON); // 45 views × 3 frames
     }
 }

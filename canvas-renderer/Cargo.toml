@@ -16,7 +16,7 @@ images = ["image"]
 
 [dependencies]
 # Core canvas types
-canvas-core = { path = "../canvas-core" }
+canvas-core = { path = "../canvas-core", version = "0.1.2" }
 
 # Serialization
 serde.workspace = true

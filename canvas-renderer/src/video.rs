@@ -411,7 +411,7 @@ mod tests {
         manager.update_texture("c", &frame);
 
         let mut ids: Vec<_> = manager.stream_ids().collect();
-        ids.sort();
+        ids.sort_unstable();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
 

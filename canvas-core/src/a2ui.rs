@@ -1197,7 +1197,7 @@ mod tests {
         let result = tree.to_elements();
 
         let small = &result.elements[0].transform;
-        let _tall = &result.elements[1].transform; // Tallest in row 1 (height 50)
+        // Element 1 is the tallest in row 1 (height 50) - used to determine row height
         let below = &result.elements[2].transform;
 
         // Row height determined by tallest element (50)
@@ -1295,17 +1295,21 @@ mod tests {
 
         let tree = A2UITree::from_json(json).expect("should parse deep nesting");
 
-        // Verify we can traverse to the deepest text
-        fn count_depth(node: &A2UINode) -> usize {
-            match node {
-                A2UINode::Container { children, .. } => {
-                    1 + children.iter().map(count_depth).max().unwrap_or(0)
+        // Verify we can traverse to the deepest text using iterative depth count
+        let depth = {
+            let mut max_depth = 0;
+            let mut stack: Vec<(&A2UINode, usize)> = vec![(&tree.root, 1)];
+            while let Some((node, d)) = stack.pop() {
+                max_depth = max_depth.max(d);
+                if let A2UINode::Container { children, .. } = node {
+                    for child in children {
+                        stack.push((child, d + 1));
+                    }
                 }
-                _ => 1,
             }
-        }
-
-        assert_eq!(count_depth(&tree.root), 6); // 5 containers + 1 text
+            max_depth
+        };
+        assert_eq!(depth, 6); // 5 containers + 1 text
 
         // Should convert successfully
         let result = tree.to_elements();
@@ -1345,7 +1349,7 @@ mod tests {
 
     #[test]
     fn test_invalid_json_returns_error() {
-        let invalid_json = r#"{ not valid json }"#;
+        let invalid_json = r"{ not valid json }";
         let result = A2UITree::from_json(invalid_json);
         assert!(result.is_err());
     }
