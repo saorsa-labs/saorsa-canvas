@@ -4,7 +4,22 @@
 
 > *Where AI meets the eye.*
 
+[![crates.io](https://img.shields.io/crates/v/canvas-core.svg)](https://crates.io/crates/canvas-core)
+[![docs.rs](https://docs.rs/canvas-core/badge.svg)](https://docs.rs/canvas-core)
+[![License](https://img.shields.io/crates/l/canvas-core.svg)](https://github.com/saorsa-labs/saorsa-canvas#license)
+
 Saorsa Canvas is an AI-native visual surface that runs on any device—from Raspberry Pi to Mac Studio to Looking Glass holographic displays. It's not a traditional UI framework; it's a **Model Context Protocol (MCP) canvas** where AI agents render content and humans participate through voice, touch, and gaze.
+
+## Crates
+
+| Crate | Description | crates.io |
+|-------|-------------|-----------|
+| [canvas-core](canvas-core/) | Scene graph, state management, input handling | [![crates.io](https://img.shields.io/crates/v/canvas-core.svg)](https://crates.io/crates/canvas-core) |
+| [canvas-renderer](canvas-renderer/) | wgpu rendering backends with WebGL2/Canvas2D fallbacks | [![crates.io](https://img.shields.io/crates/v/canvas-renderer.svg)](https://crates.io/crates/canvas-renderer) |
+| [canvas-mcp](canvas-mcp/) | MCP tools and resources for AI integration | [![crates.io](https://img.shields.io/crates/v/canvas-mcp.svg)](https://crates.io/crates/canvas-mcp) |
+| [canvas-app](canvas-app/) | WASM application for web deployment | [![crates.io](https://img.shields.io/crates/v/canvas-app.svg)](https://crates.io/crates/canvas-app) |
+| [canvas-server](canvas-server/) | Axum server with WebSocket and WebRTC signaling | [![crates.io](https://img.shields.io/crates/v/canvas-server.svg)](https://crates.io/crates/canvas-server) |
+| [canvas-desktop](canvas-desktop/) | Native desktop host using winit + wgpu | [![crates.io](https://img.shields.io/crates/v/canvas-desktop.svg)](https://crates.io/crates/canvas-desktop) |
 
 ## Why This Exists
 
@@ -20,6 +35,22 @@ This is especially powerful for **AI-mediated video calls** where:
 - You can touch the screen while speaking: "Change THIS part" becomes spatially aware
 - Two users share a synchronized canvas with AI mediating the visual conversation
 
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+canvas-core = "0.1"      # Scene graph and state management
+canvas-renderer = "0.1"  # GPU rendering (optional: disable default features for WASM)
+```
+
+Or install the server binary:
+
+```bash
+cargo install canvas-server
+```
+
 ## Quick Start
 
 ```bash
@@ -27,7 +58,7 @@ This is especially powerful for **AI-mediated video calls** where:
 cargo build --release
 
 # Run the canvas server
-./target/release/canvas-server
+./target/release/saorsa-canvas
 
 # Open http://localhost:9473 in your browser
 ```
@@ -55,10 +86,12 @@ cargo build --release
 
 ```
 saorsa-canvas/
-├── canvas-core/       # WASM core: scene graph, elements, events, state
-├── canvas-renderer/   # wgpu rendering backends
-├── canvas-server/     # Axum local server with WebSocket
+├── canvas-core/       # Scene graph, elements, events, state (WASM-compatible)
+├── canvas-renderer/   # wgpu rendering with WebGL2/Canvas2D fallbacks
 ├── canvas-mcp/        # MCP tools and resources for AI integration
+├── canvas-app/        # WASM application for web deployment
+├── canvas-server/     # Axum server with WebSocket and WebRTC signaling
+├── canvas-desktop/    # Native desktop host using winit + wgpu
 ├── canvas-skill/      # Claude Code skill for CLI usage
 ├── web/               # PWA frontend (touch, voice, offline)
 └── docs/              # Vision, specs, and development plan
