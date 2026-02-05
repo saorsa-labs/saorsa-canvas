@@ -54,6 +54,7 @@ uuid.workspace = true
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 wiremock = "0.6"

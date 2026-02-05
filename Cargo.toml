@@ -7,6 +7,7 @@ members = [
     "canvas-mcp",
     "canvas-app",
     "canvas-desktop",
+    "workspace-hack",
 ]
 
 [workspace.package]

@@ -35,6 +35,7 @@ wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

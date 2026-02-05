@@ -33,6 +33,7 @@ tracing.workspace = true
 wgpu = { workspace = true, optional = true }
 bytemuck = { version = "1.21", features = ["derive"] }
 pollster = "0.4"
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 # Windowing (for native targets)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
