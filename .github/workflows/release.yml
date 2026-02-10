@@ -129,21 +129,21 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          sleep 15
+          sleep 30
           cargo hakari publish -p canvas-renderer || echo "canvas-renderer may already be published"
 
       - name: Publish canvas-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          sleep 15
+          sleep 30
           cargo hakari publish -p canvas-mcp || echo "canvas-mcp may already be published"
 
       - name: Publish canvas-server
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          sleep 15
+          sleep 30
           cargo hakari publish -p canvas-server || echo "canvas-server may already be published"
 
   release:
