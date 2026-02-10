@@ -81,9 +81,63 @@ jobs:
           name: saorsa-canvas-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
           path: saorsa-canvas-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz
 
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-hakari
+        run: cargo install cargo-hakari
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+      - name: Publish canvas-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo hakari publish -p canvas-core
+
+      - name: Publish canvas-renderer
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          sleep 15
+          cargo hakari publish -p canvas-renderer
+
+      - name: Publish canvas-mcp
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          sleep 15
+          cargo hakari publish -p canvas-mcp
+
+      - name: Publish canvas-server
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          sleep 15
+          cargo hakari publish -p canvas-server
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write

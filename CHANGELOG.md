@@ -5,6 +5,17 @@ All notable changes to Saorsa Canvas will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-02-10
+
+### Added
+- crates.io publish step in release workflow
+- cargo-hakari aware publishing for workspace crates
+
+### Changed
+- Rewritten SKILL.md as AI-consumable tool reference
+- Added cargo-hakari workspace-hack for faster builds
+- Updated README with crates.io badges and installation instructions
+
 ## [0.1.2] - 2026-01-22
 
 ### Fixed
