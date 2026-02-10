@@ -126,7 +126,39 @@ async fn main() -> anyhow::Result<()> {
     let pkg_service = ServeDir::new(&pkg_dir);
 
     // Create sync state for WebSocket scene synchronization
-    let sync_state = SyncState::new();
+    // Use CANVAS_DATA_DIR for persistence, default to ~/.saorsa-canvas/sessions
+    let sync_state = {
+        let data_dir = std::env::var("CANVAS_DATA_DIR").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/.saorsa-canvas/sessions")
+        });
+        match SyncState::with_data_dir(&data_dir) {
+            Ok(state) => {
+                tracing::info!("Persistence enabled: {}", data_dir);
+                // Load all persisted sessions from disk
+                match state.store().load_all_sessions() {
+                    Ok(session_ids) => {
+                        for session_id in &session_ids {
+                            if let Err(e) = state.store().load_session_from_disk(session_id) {
+                                tracing::warn!("Failed to load session {}: {}", session_id, e);
+                            } else {
+                                tracing::info!("Loaded session: {}", session_id);
+                            }
+                        }
+                        if !session_ids.is_empty() {
+                            tracing::info!("Loaded {} sessions from disk", session_ids.len());
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to enumerate sessions: {}", e),
+                }
+                state
+            }
+            Err(e) => {
+                tracing::warn!("Persistence disabled ({}), using in-memory store", e);
+                SyncState::new()
+            }
+        }
+    };
     let (communitas_client, _network_retry_handle) = init_communitas_client(&sync_state).await;
 
     // Create MCP server with change notification callback

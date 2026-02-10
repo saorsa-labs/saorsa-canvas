@@ -678,6 +678,31 @@ impl SyncState {
         }
     }
 
+    /// Create a new sync state with filesystem persistence.
+    ///
+    /// Sessions are saved as JSON files in `data_dir` and auto-saved on every
+    /// mutation. The directory is created if it doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data directory cannot be created.
+    pub fn with_data_dir(
+        data_dir: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, canvas_core::StoreError> {
+        let (event_tx, _) = broadcast::channel(100);
+        let (interaction_tx, _) = broadcast::channel(100);
+        Ok(Self {
+            store: SceneStore::with_data_dir(data_dir)?,
+            event_tx,
+            interaction_tx,
+            offline_queue: Arc::new(RwLock::new(OfflineQueue::new())),
+            peers: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            communitas: Arc::new(RwLock::new(None)),
+            conflict_count: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
     /// Install a Communitas MCP client for upstream media coordination.
     pub fn set_communitas_client(&self, client: CommunitasMcpClient) {
         match self.communitas.write() {
