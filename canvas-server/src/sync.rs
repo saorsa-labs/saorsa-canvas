@@ -1643,6 +1643,8 @@ impl From<StoreError> for SyncError {
             StoreError::SessionNotFound(s) => SyncError::SessionNotFound(s),
             StoreError::ElementNotFound(s) => SyncError::ElementNotFound(s),
             StoreError::SceneError(s) => SyncError::InvalidMessage(s),
+            StoreError::Io(e) => SyncError::InvalidMessage(e.to_string()),
+            StoreError::Serialization(s) => SyncError::InvalidMessage(s),
         }
     }
 }
