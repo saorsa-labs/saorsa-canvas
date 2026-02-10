@@ -10,11 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - crates.io publish step in release workflow
 - cargo-hakari aware publishing for workspace crates
+- Linux ARM64 (aarch64) release build target
+- Windows x64 (MSVC) release build target
+- Installation instructions in SKILL.md with GitHub Releases download commands
+- Platform availability table in SKILL.md
 
 ### Changed
 - Rewritten SKILL.md as AI-consumable tool reference
 - Added cargo-hakari workspace-hack for faster builds
 - Updated README with crates.io badges and installation instructions
+- Release workflow now builds for 5 platform/arch combinations
+- Release job continues even if individual publish steps fail (idempotent)
 
 ## [0.1.2] - 2026-01-22
 

@@ -265,6 +265,59 @@ Returns the full scene graph as JSON including all elements, transforms, and pro
 | `Model3D` | `src` |
 | `Video` | `stream_id` |
 
+## Installation
+
+Saorsa Canvas server binaries are available from GitHub Releases and crates.io.
+
+### Download from GitHub Releases
+
+Pre-built binaries for all major platforms:
+
+```bash
+# Detect platform and download latest release
+REPO="saorsa-labs/saorsa-canvas"
+VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": "\(.*\)".*/\1/')
+
+# macOS Apple Silicon
+curl -L "https://github.com/$REPO/releases/download/$VERSION/saorsa-canvas-$VERSION-aarch64-apple-darwin.tar.gz" -o saorsa-canvas.tar.gz
+
+# macOS Intel
+curl -L "https://github.com/$REPO/releases/download/$VERSION/saorsa-canvas-$VERSION-x86_64-apple-darwin.tar.gz" -o saorsa-canvas.tar.gz
+
+# Linux x64
+curl -L "https://github.com/$REPO/releases/download/$VERSION/saorsa-canvas-$VERSION-x86_64-unknown-linux-gnu.tar.gz" -o saorsa-canvas.tar.gz
+
+# Linux ARM64
+curl -L "https://github.com/$REPO/releases/download/$VERSION/saorsa-canvas-$VERSION-aarch64-unknown-linux-gnu.tar.gz" -o saorsa-canvas.tar.gz
+
+# Windows x64
+curl -L "https://github.com/$REPO/releases/download/$VERSION/saorsa-canvas-$VERSION-x86_64-pc-windows-msvc.zip" -o saorsa-canvas.zip
+```
+
+Extract and run:
+
+```bash
+tar -xzf saorsa-canvas.tar.gz  # Unix
+./saorsa-canvas                 # Start server on port 9473
+```
+
+### Install via crates.io
+
+```bash
+cargo install canvas-server
+saorsa-canvas
+```
+
+### Available platforms
+
+| Platform | Architecture | Archive |
+|----------|-------------|---------|
+| macOS | Apple Silicon (M1/M2/M3/M4) | `.tar.gz` |
+| macOS | Intel x64 | `.tar.gz` |
+| Linux | x64 (AMD/Intel) | `.tar.gz` |
+| Linux | ARM64 (Raspberry Pi, AWS Graviton) | `.tar.gz` |
+| Windows | x64 | `.zip` |
+
 ## Patterns
 
 - **Clear and rebuild**: Call `canvas_clear`, then `canvas_render` with new content.
