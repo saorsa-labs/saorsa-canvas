@@ -41,8 +41,8 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-canvas-core = "0.1"      # Scene graph and state management
-canvas-renderer = "0.1"  # GPU rendering (optional: disable default features for WASM)
+canvas-core = "0.2"      # Scene graph and state management
+canvas-renderer = "0.2"  # GPU rendering (optional: disable default features for WASM)
 ```
 
 Or install the server binary:
@@ -203,6 +203,24 @@ Add as a skill to display visuals from CLI:
 ln -s /path/to/saorsa-canvas/canvas-skill ~/.claude/skills/canvas
 
 # Now Claude Code can render to the canvas
+```
+
+## Usage with Fae
+
+[Fae](https://github.com/saorsa-labs/fae) is a voice assistant that uses Saorsa Canvas as its visual output layer. The integration flow:
+
+```
+Voice Input → STT → LLM Agent → MCP Tools → canvas_render() → Scene Graph → HTML Pane
+```
+
+Fae embeds `canvas-core` and `canvas-mcp` as dependencies and renders the scene in a Dioxus webview pane. It can also connect to a remote `canvas-server` via WebSocket for multi-device sync.
+
+```toml
+# In fae's Cargo.toml
+[dependencies]
+canvas-core = "0.2"
+canvas-mcp = "0.2"
+canvas-renderer = { version = "0.2", default-features = false, features = ["charts", "images"] }
 ```
 
 ## Part of the Saorsa Labs Ecosystem
