@@ -71,6 +71,7 @@ pub async fn get_session_scene(
         )
             .into_response();
     }
+    state.sync().record_access(&session_id);
     get_scene_for_session(&state, &session_id)
         .await
         .into_response()

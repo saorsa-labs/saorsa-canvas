@@ -657,6 +657,8 @@ pub struct SyncState {
     communitas: Arc<RwLock<Option<CommunitasMcpClient>>>,
     /// Counter for sync conflicts/failures.
     conflict_count: Arc<AtomicU64>,
+    /// Last access time per session (for expiry).
+    last_access: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl SyncState {
@@ -675,6 +677,7 @@ impl SyncState {
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             communitas: Arc::new(RwLock::new(None)),
             conflict_count: Arc::new(AtomicU64::new(0)),
+            last_access: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -700,6 +703,7 @@ impl SyncState {
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             communitas: Arc::new(RwLock::new(None)),
             conflict_count: Arc::new(AtomicU64::new(0)),
+            last_access: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -1352,6 +1356,47 @@ impl SyncState {
     #[must_use]
     pub fn store(&self) -> SceneStore {
         self.store.clone()
+    }
+
+    /// Record access to a session for expiry tracking.
+    pub fn record_access(&self, session_id: &str) {
+        if let Ok(mut map) = self.last_access.write() {
+            map.insert(session_id.to_string(), Instant::now());
+        }
+    }
+
+    /// Remove sessions that have not been accessed within `ttl`.
+    ///
+    /// Deletes both in-memory state and any persisted JSON files. Returns the
+    /// number of sessions removed.
+    pub fn cleanup_expired_sessions(&self, ttl: Duration) -> usize {
+        let expired: Vec<String> = {
+            let map = match self.last_access.read() {
+                Ok(m) => m,
+                Err(_) => return 0,
+            };
+            let now = Instant::now();
+            map.iter()
+                .filter(|(_, &last)| now.duration_since(last) > ttl)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let mut removed = 0;
+        for session_id in &expired {
+            // Remove from in-memory store
+            if self.store.clear(session_id).is_ok() {
+                tracing::info!("Expired session removed: {}", session_id);
+                removed += 1;
+            }
+            // Remove persisted file
+            self.store.delete_session_file(session_id);
+            // Remove from access map
+            if let Ok(mut map) = self.last_access.write() {
+                map.remove(session_id);
+            }
+        }
+        removed
     }
 
     /// Subscribe to sync events.
@@ -2478,6 +2523,7 @@ impl ClientConnection {
                     return Some(Self::validation_error(&e, None));
                 }
                 self.session_id = session_id.clone();
+                self.state.record_access(&self.session_id);
                 // Send current scene state
                 Some(self.state.get_scene_update(&self.session_id))
             }
@@ -5956,5 +6002,75 @@ mod tests {
                 prop_assert_eq!(result.conflict_count, 0);
             }
         }
+    }
+
+    // === Session Expiry Tests ===
+
+    #[test]
+    fn test_record_access_and_expiry() {
+        let state = SyncState::new();
+        state.record_access("session-a");
+        state.record_access("session-b");
+
+        // With a huge TTL, nothing should expire
+        let removed = state.cleanup_expired_sessions(Duration::from_secs(3600));
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_expiry_removes_stale_sessions() {
+        let state = SyncState::new();
+
+        // Create sessions
+        state
+            .store
+            .add_element(
+                "stale-session",
+                Element::new(canvas_core::ElementKind::Text {
+                    content: "stale".into(),
+                    font_size: 12.0,
+                    color: "#000".into(),
+                }),
+            )
+            .expect("add");
+
+        state
+            .store
+            .add_element(
+                "active-session",
+                Element::new(canvas_core::ElementKind::Text {
+                    content: "active".into(),
+                    font_size: 12.0,
+                    color: "#000".into(),
+                }),
+            )
+            .expect("add");
+
+        // Manually insert a past Instant for the stale session
+        {
+            let mut map = state.last_access.write().expect("lock");
+            map.insert(
+                "stale-session".into(),
+                Instant::now() - Duration::from_secs(7200),
+            );
+            map.insert("active-session".into(), Instant::now());
+        }
+
+        // Expire with 1h TTL — stale should be removed, active preserved
+        let removed = state.cleanup_expired_sessions(Duration::from_secs(3600));
+        assert_eq!(removed, 1);
+
+        // Active session should still exist
+        assert!(state.store.get("active-session").is_some());
+    }
+
+    #[test]
+    fn test_expiry_preserves_active_sessions() {
+        let state = SyncState::new();
+        state.record_access("fresh-session");
+
+        // Short cleanup with large TTL — nothing removed
+        let removed = state.cleanup_expired_sessions(Duration::from_secs(86400));
+        assert_eq!(removed, 0);
     }
 }

@@ -159,6 +159,30 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
+    // Spawn session expiry background task
+    {
+        let session_ttl_hours: u64 = std::env::var("CANVAS_SESSION_TTL_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
+        let cleanup_state = sync_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            let ttl = std::time::Duration::from_secs(session_ttl_hours * 3600);
+            loop {
+                interval.tick().await;
+                let removed = cleanup_state.cleanup_expired_sessions(ttl);
+                if removed > 0 {
+                    tracing::info!("Session cleanup: removed {} expired sessions", removed);
+                }
+            }
+        });
+        tracing::info!(
+            "Session expiry task started (TTL: {}h, check interval: 1h)",
+            session_ttl_hours
+        );
+    }
+
     let (communitas_client, _network_retry_handle) = init_communitas_client(&sync_state).await;
 
     // Create MCP server with change notification callback
