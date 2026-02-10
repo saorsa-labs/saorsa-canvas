@@ -33,7 +33,7 @@ Implement the phases in `docs/DEVELOPMENT_PLAN.md` sequentially. Start with **Ph
 
 ## Critical Rules
 
-1. **Run tests after every change**: `cargo test -p <crate>`
+1. **Run tests after every change**: `cargo nextest run -p <crate>`
 2. **Commit after each task**: Use descriptive messages
 3. **Maintain code quality**: All existing lints must pass
    - `#![forbid(unsafe_code)]`
@@ -50,7 +50,7 @@ Implement the phases in `docs/DEVELOPMENT_PLAN.md` sequentially. Start with **Ph
 cargo build --release
 
 # Run tests
-cargo test --workspace
+cargo nextest run --workspace
 
 # Run server
 cargo run -p canvas-server

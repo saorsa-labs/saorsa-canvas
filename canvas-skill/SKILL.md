@@ -1,171 +1,273 @@
-# Saorsa Canvas Skill
+# Saorsa Canvas — AI Tool Reference
 
-Display visual content through a universal AI canvas that works on any device.
+Render visual content (charts, images, text, 3D, video) to a shared canvas.
 
-## Overview
+## Tools
 
-Saorsa Canvas is the visual presentation layer for AI agents. When an AI needs to show something—charts, images, video, 3D models—it renders here. The canvas runs on phones, desktops, holographic displays, and terminals.
+| Tool | Purpose |
+|------|---------|
+| `canvas_render` | Render chart, image, or text to the canvas |
+| `canvas_render_a2ui` | Render an A2UI component tree with layout |
+| `canvas_interact` | Report touch, voice, or selection interaction |
+| `canvas_export` | Export canvas to PNG, JPEG, SVG, or PDF |
+| `canvas_clear` | Clear all elements from the canvas |
+| `canvas_add_element` | Add element with full transform control |
+| `canvas_remove_element` | Remove element by ID |
+| `canvas_update_element` | Update element position, size, or rotation |
+| `canvas_get_scene` | Get current scene as JSON |
 
-**Key Concept**: The AI controls the canvas. Users observe and provide feedback through touch + voice.
+## canvas_render
 
-## When to Use
+High-level content rendering. Omit `session_id` to use the default session.
 
-Invoke this skill when the user asks to:
-- Display a chart, graph, or visualization
-- Show an image or diagram
-- Render a 3D model
-- Create a visual presentation
-- Start a video call or screen share
-- Annotate or mark up visual content
-
-## Quick Start
-
-```bash
-# Start the canvas server
-cd ~/Desktop/Devel/projects/saorsa-canvas
-cargo run -p canvas-server
-
-# Server starts on http://localhost:9473
-# Open in browser to see the canvas
-```
-
-## MCP Tools
-
-### canvas_render
-
-Render content to the canvas:
+### Bar chart
 
 ```json
 {
-  "tool": "canvas_render",
-  "params": {
-    "session_id": "default",
-    "content": {
-      "type": "Chart",
-      "data": {
-        "chart_type": "bar",
-        "data": {
-          "labels": ["Q1", "Q2", "Q3", "Q4"],
-          "values": [100, 150, 120, 180]
-        },
-        "title": "Quarterly Revenue"
-      }
+  "session_id": "default",
+  "content": {
+    "type": "Chart",
+    "data": {
+      "chart_type": "bar",
+      "data": { "labels": ["Q1", "Q2", "Q3", "Q4"], "values": [100, 150, 120, 180] },
+      "title": "Quarterly Revenue"
     }
   }
 }
 ```
 
-**Content Types**:
-- `Chart` - bar, line, pie, scatter
-- `Image` - PNG, JPEG, SVG, WebP (URL or base64)
-- `Model3D` - glTF models
-- `Video` - WebRTC stream ID
-- `Text` - Labels and annotations
-
-### canvas_interact
-
-Report user interaction (touch + voice fusion):
+### Line chart
 
 ```json
 {
-  "tool": "canvas_interact",
-  "params": {
-    "session_id": "default",
-    "interaction": {
-      "type": "Voice",
-      "data": {
-        "transcript": "Make this bar red",
-        "context_element": "bar-2"
-      }
+  "content": {
+    "type": "Chart",
+    "data": {
+      "chart_type": "line",
+      "data": { "labels": ["Jan", "Feb", "Mar", "Apr"], "values": [10, 25, 18, 40] },
+      "title": "Monthly Growth"
     }
   }
 }
 ```
 
-### canvas_export
-
-Export canvas to file:
+### Pie chart
 
 ```json
 {
-  "tool": "canvas_export",
-  "params": {
-    "session_id": "default",
-    "format": "png",
-    "quality": 90
+  "content": {
+    "type": "Chart",
+    "data": {
+      "chart_type": "pie",
+      "data": { "labels": ["Rent", "Food", "Transport", "Other"], "values": [40, 25, 20, 15] },
+      "title": "Budget Breakdown"
+    }
   }
 }
 ```
 
-## Touch + Voice Interaction
+### Area chart
 
-The canvas fuses touch and voice input for spatial intent:
-
-```
-User touches element while saying: "Change THIS to blue"
-                    ↓
-Canvas captures: { touch: {element: "chart-bar-3"}, voice: "Change THIS to blue" }
-                    ↓
-AI understands: Update element chart-bar-3 color to blue
-```
-
-This makes "THIS", "HERE", and "THAT" meaningful in conversation.
-
-## Project Structure
-
-```
-saorsa-canvas/
-├── canvas-core/       # WASM core: scene graph, events
-├── canvas-renderer/   # GPU rendering (wgpu)
-├── canvas-server/     # Local HTTP/WebSocket server
-├── canvas-mcp/        # MCP tool implementations
-├── canvas-skill/      # This skill file
-├── web/               # PWA frontend
-└── docs/
-    ├── VISION.md           # Architecture and philosophy
-    ├── DEVELOPMENT_PLAN.md # Implementation roadmap
-    └── SPECS.md            # Standards reference
+```json
+{
+  "content": {
+    "type": "Chart",
+    "data": {
+      "chart_type": "area",
+      "data": { "labels": ["Mon", "Tue", "Wed", "Thu", "Fri"], "values": [5, 12, 8, 15, 20] },
+      "title": "Daily Traffic"
+    }
+  }
+}
 ```
 
-## Development
+### Scatter plot
 
-See `CLAUDE.md` in the project root for development instructions.
-
-**Build**:
-```bash
-cargo build --release
+```json
+{
+  "content": {
+    "type": "Chart",
+    "data": {
+      "chart_type": "scatter",
+      "data": { "points": [{"x": 1, "y": 2}, {"x": 3, "y": 5}, {"x": 5, "y": 4}, {"x": 7, "y": 8}] },
+      "title": "Correlation"
+    }
+  }
+}
 ```
 
-**Test**:
-```bash
-cargo test --workspace
+### Image
+
+```json
+{
+  "content": {
+    "type": "Image",
+    "data": { "src": "https://example.com/photo.jpg" }
+  }
+}
 ```
 
-**Run**:
-```bash
-cargo run -p canvas-server
-# Open http://localhost:9473
+### Text annotation
+
+```json
+{
+  "content": {
+    "type": "Text",
+    "data": { "content": "Important note", "font_size": 18.0 }
+  }
+}
 ```
 
-## Integration with Communitas
+### With position
 
-Saorsa Canvas is the visual layer for the Communitas P2P collaboration platform. MCP tools are exposed through the Communitas MCP server, allowing any connected AI agent to render to user canvases.
+Add `position` to place content at a specific location:
 
-## Offline Mode
+```json
+{
+  "content": { "type": "Text", "data": { "content": "Top-left label", "font_size": 14.0 } },
+  "position": { "x": 10, "y": 10, "width": 200, "height": 30 }
+}
+```
 
-When disconnected:
-- View, pan, zoom still work
-- Interactions queue locally
-- Sync happens on reconnect
-- Banner shows offline status
+## canvas_render_a2ui
 
-## Future Capabilities
+Render a component tree with automatic layout:
 
-- **Holographic output**: Looking Glass displays via WebXR
-- **Spatial computing**: VisionOS, Quest, Android XR
-- **Video compositing**: WebRTC feeds as canvas layers
-- **Terminal rendering**: Sixel/Kitty graphics for CLI
+```json
+{
+  "tree": {
+    "root": {
+      "type": "Container",
+      "direction": "column",
+      "children": [
+        { "type": "Text", "value": "Dashboard", "style": { "fontSize": 24 } },
+        { "type": "Chart", "chartType": "bar", "data": { "labels": ["A", "B"], "values": [10, 20] } }
+      ]
+    }
+  },
+  "merge": false
+}
+```
 
----
+## canvas_interact
 
-*Part of Saorsa Labs - Building infrastructure for decentralized AI*
+Report user interaction with canvas content.
+
+### Touch
+
+```json
+{
+  "interaction_type": "touch",
+  "data": { "element_id": "chart-bar-2", "action": "tap", "x": 150, "y": 200 }
+}
+```
+
+### Voice with spatial context
+
+```json
+{
+  "interaction_type": "voice",
+  "data": { "transcript": "Make this one red", "context_element": "chart-bar-2" }
+}
+```
+
+### Selection
+
+```json
+{
+  "interaction_type": "selection",
+  "data": { "element_id": "chart-bar-2", "selected": true }
+}
+```
+
+## canvas_export
+
+```json
+{
+  "format": "png",
+  "quality": 90
+}
+```
+
+Formats: `png`, `jpeg`, `svg`, `pdf`. Quality (0-100) applies to lossy formats.
+
+## canvas_clear
+
+```json
+{
+  "session_id": "default"
+}
+```
+
+## canvas_add_element
+
+Low-level element creation with full transform control:
+
+```json
+{
+  "kind": {
+    "type": "Chart",
+    "data": { "chart_type": "bar", "data": { "labels": ["A", "B"], "values": [10, 20] } }
+  },
+  "transform": { "x": 50, "y": 50, "width": 400, "height": 300, "rotation": 0, "z_index": 1 },
+  "interactive": true
+}
+```
+
+Element types: `Text`, `Chart`, `Image`, `Model3D`, `Video`, `OverlayLayer`, `Group`.
+
+## canvas_remove_element
+
+```json
+{
+  "element_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+## canvas_update_element
+
+Partial transform update (only specified fields change):
+
+```json
+{
+  "element_id": "550e8400-e29b-41d4-a716-446655440000",
+  "transform": { "x": 100, "y": 200 }
+}
+```
+
+## canvas_get_scene
+
+```json
+{
+  "session_id": "default"
+}
+```
+
+Returns the full scene graph as JSON including all elements, transforms, and properties.
+
+## Chart data formats
+
+| chart_type | data shape |
+|------------|------------|
+| `bar` | `{ "labels": [...], "values": [...] }` |
+| `line` | `{ "labels": [...], "values": [...] }` |
+| `pie` | `{ "labels": [...], "values": [...] }` |
+| `area` | `{ "labels": [...], "values": [...] }` |
+| `scatter` | `{ "points": [{"x": N, "y": N}, ...] }` |
+
+## Content types
+
+| type | required fields |
+|------|----------------|
+| `Chart` | `chart_type`, `data` |
+| `Image` | `src` |
+| `Text` | `content` |
+| `Model3D` | `src` |
+| `Video` | `stream_id` |
+
+## Patterns
+
+- **Clear and rebuild**: Call `canvas_clear`, then `canvas_render` with new content.
+- **Update in place**: Use `canvas_update_element` with the element ID from a previous render.
+- **Layer annotations**: Render a chart first, then add `Text` elements on top.
+- **Touch + Voice fusion**: "Change THIS to blue" + touch on bar-3 resolves to updating bar-3's color.
