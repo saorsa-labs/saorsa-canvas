@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 description = "Core canvas logic for Saorsa Canvas - scene graph, state management, input handling. Compiles to WASM for universal portability."
 

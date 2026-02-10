@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-include = ["src/**/*", "web/**/*", "Cargo.toml"]
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+include = ["src/**/*", "web/**/*", "Cargo.toml", "README.md"]
 
 description = "Local embedded Axum server for Saorsa Canvas. Serves the PWA and handles WebRTC signaling."
 
