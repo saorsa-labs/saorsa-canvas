@@ -236,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             get(routes::get_scene_handler).post(routes::update_scene_handler),
         )
         .route("/api/scene/{session_id}", get(routes::get_session_scene))
+        .route("/api/export", post(routes::export_scene_handler))
         // AG-UI endpoints
         .nest("/ag-ui", agui_router)
         // Serve WASM package at /pkg

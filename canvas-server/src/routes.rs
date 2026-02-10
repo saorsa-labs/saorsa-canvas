@@ -2,13 +2,14 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 
 use canvas_core::{ElementDocument, SceneDocument};
+use canvas_renderer::export::{ExportConfig, ExportFormat, SceneExporter};
 
 use crate::metrics::record_validation_failure;
 use crate::sync::{current_timestamp, SyncOrigin};
@@ -165,6 +166,112 @@ pub async fn update_scene_handler(
 
     // Return updated scene
     get_scene_for_session(&state, session_id).await
+}
+
+/// Request body for the export endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ExportRequest {
+    /// Session ID to export.
+    pub session_id: String,
+    /// Output format: "png", "jpeg", "svg", "pdf".
+    pub format: String,
+    /// Optional width override (pixels).
+    pub width: Option<u32>,
+    /// Optional height override (pixels).
+    pub height: Option<u32>,
+    /// DPI for print export (default 96).
+    pub dpi: Option<f32>,
+    /// JPEG quality 1-100 (default 85).
+    pub quality: Option<u8>,
+    /// Scale factor (default 1.0).
+    pub scale: Option<f32>,
+}
+
+/// Export a session's scene to an image/document format.
+pub async fn export_scene_handler(
+    State(state): State<AppState>,
+    Json(request): Json<ExportRequest>,
+) -> impl IntoResponse {
+    // Validate session ID
+    if let Err(e) = validate_session_id(&request.session_id) {
+        record_validation_failure("session_id");
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({"success": false, "error": e.to_string()})
+                .to_string()
+                .into_bytes(),
+        )
+            .into_response();
+    }
+
+    // Parse format
+    let format = match request.format.as_str() {
+        "png" => ExportFormat::Png,
+        "jpeg" | "jpg" => ExportFormat::Jpeg,
+        "svg" => ExportFormat::Svg,
+        "pdf" => ExportFormat::Pdf,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"success": false, "error": format!("Unsupported format: {other}")})
+                    .to_string()
+                    .into_bytes(),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the scene
+    let sync = state.sync();
+    let scene = match sync.store().get(&request.session_id) {
+        Some(scene) => scene,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"success": false, "error": "Session not found"})
+                    .to_string()
+                    .into_bytes(),
+            )
+                .into_response();
+        }
+    };
+
+    // Configure exporter
+    let config = ExportConfig {
+        width: request.width,
+        height: request.height,
+        dpi: request.dpi.unwrap_or(96.0),
+        jpeg_quality: request.quality.unwrap_or(85),
+        scale: request.scale.unwrap_or(1.0),
+        ..Default::default()
+    };
+
+    let exporter = SceneExporter::new(config);
+
+    // Export
+    match exporter.export(&scene, format) {
+        Ok(data) => {
+            let content_type = match format {
+                ExportFormat::Png => "image/png",
+                ExportFormat::Jpeg => "image/jpeg",
+                ExportFormat::Svg => "image/svg+xml",
+                ExportFormat::Pdf => "application/pdf",
+            };
+
+            (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], data).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({"success": false, "error": format!("Export failed: {e}")})
+                .to_string()
+                .into_bytes(),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]
