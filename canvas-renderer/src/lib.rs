@@ -23,6 +23,8 @@ pub mod backend;
 #[cfg(feature = "charts")]
 pub mod chart;
 pub mod error;
+#[cfg(feature = "export")]
+pub mod export;
 pub mod holographic;
 #[cfg(feature = "images")]
 pub mod image;
@@ -35,6 +37,8 @@ pub mod video;
 
 pub use backend::RenderBackend;
 pub use error::{RenderError, RenderResult};
+#[cfg(feature = "export")]
+pub use export::{ExportConfig, ExportFormat, SceneExporter};
 pub use holographic::{
     HoloPlayInfo, HolographicRenderResult, HolographicRenderer, HolographicStats,
 };

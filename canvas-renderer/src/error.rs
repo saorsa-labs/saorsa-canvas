@@ -35,4 +35,12 @@ pub enum RenderError {
     /// Invalid viewport configuration.
     #[error("Invalid viewport: {0}")]
     Viewport(String),
+
+    /// Export failed.
+    #[error("Export failed: {0}")]
+    Export(String),
+
+    /// I/O error during export.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
