@@ -22,7 +22,7 @@ export = ["resvg", "usvg", "tiny-skia", "printpdf", "image"]
 
 [dependencies]
 # Core canvas types
-canvas-core = { path = "../canvas-core", version = "0.1.4" }
+canvas-core = { path = "../canvas-core", version = "0.2.0" }
 
 # Serialization
 serde.workspace = true

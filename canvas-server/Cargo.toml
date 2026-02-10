@@ -23,9 +23,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Core crates
-canvas-core = { path = "../canvas-core", version = "0.1.4" }
-canvas-renderer = { path = "../canvas-renderer", version = "0.1.4", features = ["export"] }
-canvas-mcp = { path = "../canvas-mcp", version = "0.1.4" }
+canvas-core = { path = "../canvas-core", version = "0.2.0" }
+canvas-renderer = { path = "../canvas-renderer", version = "0.2.0", features = ["export"] }
+canvas-mcp = { path = "../canvas-mcp", version = "0.2.0" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 

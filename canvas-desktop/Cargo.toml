@@ -19,8 +19,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-canvas-core = { path = "../canvas-core", version = "0.1.4" }
-canvas-renderer = { path = "../canvas-renderer", version = "0.1.4", features = ["gpu"] }
+canvas-core = { path = "../canvas-core", version = "0.2.0" }
+canvas-renderer = { path = "../canvas-renderer", version = "0.2.0", features = ["gpu"] }
 pollster = "0.4"
 winit.workspace = true
 wgpu.workspace = true
