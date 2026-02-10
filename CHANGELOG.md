@@ -5,6 +5,18 @@ All notable changes to Saorsa Canvas will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-02-10
+
+### Added
+- Linux ARM64 (aarch64) release build target
+- Windows x64 (MSVC) release build target
+- Installation instructions in SKILL.md with GitHub Releases download commands
+- Platform availability table in SKILL.md
+
+### Changed
+- Release workflow now builds for 5 platform/arch combinations
+- Release job continues even if individual publish steps fail (idempotent)
+
 ## [0.1.3] - 2026-02-10
 
 ### Added
