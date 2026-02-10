@@ -1,7 +1,7 @@
 //! Test server harness for integration tests.
 //!
 //! Provides a way to spin up a real Axum server on a random port
-//! for integration testing with WebSocket and HTTP clients.
+//! for integration testing with WebSocket, HTTP, and export clients.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,16 +19,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tower_http::cors::{Any, CorsLayer};
 
-// Re-use sync types from canvas-server
-// Note: We need to import from the crate being tested
+// Re-use types from canvas-server
+use canvas_server::routes;
 use canvas_server::sync::{current_timestamp, handle_sync_socket, SyncOrigin, SyncState};
-
-/// Shared application state for test server.
-#[derive(Clone)]
-struct TestAppState {
-    mcp: Arc<CanvasMcpServer>,
-    sync: SyncState,
-}
+use canvas_server::AppState;
 
 /// A test server instance with control handles.
 pub struct TestServer {
@@ -64,17 +58,19 @@ impl TestServer {
             let _ = scene_tx.send(event);
         });
 
-        let state = TestAppState {
+        let state = AppState {
             mcp: Arc::new(mcp),
             sync: sync_state.clone(),
+            communitas: None,
         };
 
-        // Build a minimal router for testing (no static files)
+        // Build a router for testing (no static files)
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/ws", get(ws_handler))
             .route("/ws/sync", get(ws_handler))
             .route("/mcp", post(mcp_handler))
+            .route("/api/export", post(routes::export_scene_handler))
             .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
             .with_state(state);
 
@@ -112,6 +108,7 @@ impl TestServer {
     }
 
     /// Get the WebSocket URL for connecting to the server.
+    #[allow(dead_code)]
     pub fn ws_url(&self) -> String {
         format!("ws://{}/ws", self.addr)
     }
@@ -120,6 +117,18 @@ impl TestServer {
     #[allow(dead_code)]
     pub fn mcp_url(&self) -> String {
         format!("http://{}/mcp", self.addr)
+    }
+
+    /// Get the export API URL.
+    #[allow(dead_code)]
+    pub fn export_url(&self) -> String {
+        format!("http://{}/api/export", self.addr)
+    }
+
+    /// Get the base HTTP URL for the server.
+    #[allow(dead_code)]
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
     }
 
     /// Get access to the sync state (for test assertions).
@@ -143,12 +152,12 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<TestAppState>) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_sync_socket(socket, state.sync))
 }
 
 async fn mcp_handler(
-    State(state): State<TestAppState>,
+    State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let response = state.mcp.handle_request(request).await;
