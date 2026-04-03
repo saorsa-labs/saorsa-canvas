@@ -25,3 +25,17 @@ platforms = [
 
 # Write out exact versions rather than a semver range. (Defaults to false.)
 # exact-versions = true
+
+# Exclude WASM-only crates from hakari management (tokio "full" is incompatible with wasm32)
+[traversal-excludes]
+workspace-members = ["canvas-app"]
+
+# Exclude tokio and hyper from hakari output — they pull in mio which is wasm-incompatible.
+# These are managed manually in platform-specific sections of workspace-hack/Cargo.toml.
+[final-excludes]
+third-party = [
+    { name = "tokio" },
+    { name = "hyper" },
+    { name = "h2" },
+    { name = "mio" },
+]
