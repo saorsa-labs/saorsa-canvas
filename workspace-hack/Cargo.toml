@@ -44,3 +44,10 @@ quote = { version = "1" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 
 ### END HAKARI SECTION
+
+# Tokio: full features on native, minimal on wasm (mio is incompatible with wasm32)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
